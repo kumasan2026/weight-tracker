@@ -1,260 +1,240 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import datetime
-import json
-import hashlib
-import os
 import matplotlib.pyplot as plt
+import json
+import base64
+from datetime import datetime
 
-# --- ページ設定 ---
-st.set_page_config(
-    page_title="Professional Health Tracker Desktop",
-    page_icon="⚖️",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Streamlit アプリケーションの基本設定
+st.set_page_config(page_title="Professional Health Tracker Pro", layout="wide")
 
-# --- アプリ状態の初期化 ---
-if 'current_user' not in st.session_state:
-    st.session_state.current_user = None
-
-# --- スタイリング (プロ級のカスタムCSS) ---
-st.markdown("""
+# 1. 開発要件: 印刷用CSSの組み込み (@media print)
+st.markdown(
+    """
     <style>
-    .main { background-color: #f8f9fa; }
-    .stButton>button { width: 100%; border-radius: 8px; }
-    .metric-card {
-        background-color: white;
-        padding: 20px;
-        border-radius: 12px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-        border-left: 5px solid #4CAF50;
-        margin-bottom: 15px;
-    }
-    .metric-title { font-size: 14px; color: #6c757d; font-weight: bold; }
-    .metric-value { font-size: 24px; color: #212529; font-weight: bold; margin-top: 5px; }
-    
     @media print {
-        .no-print, [data-testid="stSidebar"], button, header { display: none !important; }
-        .main { width: 100% !important; background-color: white !important; }
+        [data-testid="stSidebar"], 
+        button, 
+        .stButton, 
+        header, 
+        footer, 
+        .embeddedComponent,
+        [data-testid="stExpander"] {
+            display: none !important;
+        }
+        .main .block-container {
+            padding: 0 !important;
+        }
     }
     </style>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True
+)
 
-# --- ユーティリティ関数（データ保存・読み込みロジック） ---
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
-
-def calculate_bmi(weight, height_cm):
-    if height_cm > 0:
-        return round(weight / ((height_cm / 100) ** 2), 1)
-    return 0
-
-def get_data_directory():
-    # セッションまたは入力から保存先フォルダを取得（デフォルトは health_app_data）
-    target_dir = st.session_state.get("custom_data_dir", "health_app_data").strip()
-    if not target_dir:
-        target_dir = "health_app_data"
+# グラフ描画を完全に独立した関数にして、メインコードのネスト(階層)を消滅させる
+def draw_charts(df):
+    # 1段目: 体重・BMI・筋肉量
+    st.write("**【身体組成トレンド (Weight / BMI / Muscle)】**")
+    fig1, ax1_1 = plt.subplots(figsize=(12, 4))
+    ax1_1.set_xlabel('Date')
+    ax1_1.set_ylabel('Weight / Muscle (kg)', color='tab:blue')
+    ax1_1.plot(df['date'], df['weight'], marker='o', color='tab:blue', linewidth=2, label='Weight (kg)')
+    ax1_1.plot(df['date'], df['muscle'], marker='^', color='tab:green', linewidth=2, label='Muscle (kg)')
+    ax1_1.tick_params(axis='y', labelcolor='tab:blue')
+    ax1_1.grid(True, linestyle='--', alpha=0.5)
     
-    # フォルダが存在しなければ作成を試みる
+    ax2_1 = ax1_1.twinx()
+    ax2_1.set_ylabel('BMI', color='tab:orange')
+    ax2_1.plot(df['date'], df['bmi'], marker='s', color='tab:orange', linewidth=2, linestyle='--', label='BMI')
+    ax2_1.tick_params(axis='y', labelcolor='tab:orange')
+    ax2_1.axhspan(18.5, 25.0, color='green', alpha=0.1, label='Healthy BMI Zone (18.5-25.0)')
+    
+    lines1, labels1 = ax1_1.get_legend_handles_labels()
+    lines2, labels2 = ax2_1.get_legend_handles_labels()
+    ax1_1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+    fig1.tight_layout()
+    st.pyplot(fig1)
+
+    st.write("---") 
+
+    # 2段目: 体脂肪率・内臓脂肪・体内水分率
+    st.write("**【脂肪・水分トレンド (Fat % / Visceral / Water %)】**")
+    fig2, ax2_2 = plt.subplots(figsize=(12, 4))
+    ax2_2.set_xlabel('Date')
+    ax2_2.set_ylabel('Ratio (%)', color='tab:red')
+    ax2_2.plot(df['date'], df['fat_pct'], marker='o', color='tab:red', linewidth=2, label='Body Fat (%)')
+    ax2_2.plot(df['date'], df['water'], marker='d', color='tab:cyan', linewidth=2, label='Body Water (%)')
+    ax2_2.tick_params(axis='y', labelcolor='tab:red')
+    ax2_2.grid(True, linestyle='--', alpha=0.5)
+    
+    ax2_3 = ax2_2.twinx()
+    ax2_3.set_ylabel('Visceral Fat Level', color='tab:purple')
+    ax2_3.plot(df['date'], df['visceral'], marker='x', color='tab:purple', linewidth=2, linestyle=':', label='Visceral Fat Lv')
+    ax2_3.tick_params(axis='y', labelcolor='tab:purple')
+    
+    lines3, labels3 = ax2_2.get_legend_handles_labels()
+    lines4, labels4 = ax2_3.get_legend_handles_labels()
+    ax2_2.legend(lines3 + lines4, labels3 + labels4, loc='upper left')
+    fig2.tight_layout()
+    st.pyplot(fig2)
+
+# 簡易的なパスワードハッシュ化関数
+def simple_hash(password: str) -> str:
+    return base64.b64encode(password.encode()).decode()
+
+# URLクエリパラメータによる同期
+def load_data_from_url():
     try:
-        if not os.path.exists(target_dir):
-            os.makedirs(target_dir)
-        return target_dir
-    except Exception as e:
-        st.error(f"指定されたフォルダの作成またはアクセスに失敗しました。デフォルトを使用します。エラー: {e}")
-        if not os.path.exists("health_app_data"):
-            os.makedirs("health_app_data")
-        return "health_app_data"
-
-def get_profile_path():
-    return os.path.join(get_data_directory(), "profiles.json")
-
-def load_profiles():
-    profile_path = get_profile_path()
-    if os.path.exists(profile_path):
-        try:
-            with open(profile_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
+        if "health_data" in st.query_params:
+            return json.loads(base64.b64decode(st.query_params["health_data"].encode()).decode())
+    except:
+        pass
     return {}
 
-def save_profiles(profiles):
-    profile_path = get_profile_path()
-    with open(profile_path, "w", encoding="utf-8") as f:
-        json.dump(profiles, f, ensure_ascii=False, indent=4)
+def save_data_to_url(data):
+    try:
+        st.query_params["health_data"] = base64.b64encode(json.dumps(data).encode()).decode()
+    except:
+        pass
 
-def get_user_csv_path(username):
-    return os.path.join(get_data_directory(), f"data_{username}.csv")
+# 状態保持の初期化
+stored_data = load_data_from_url()
+if "user_db" not in st.session_state:
+    st.session_state.user_db = stored_data.get("user_db", {})
+if "records" not in st.session_state:
+    st.session_state.records = stored_data.get("records", [])
+if "logged_in_user" not in st.session_state:
+    st.session_state.logged_in_user = None
 
-def load_user_data(username):
-    csv_path = get_user_csv_path(username)
-    if os.path.exists(csv_path):
-        try:
-            return pd.read_csv(csv_path)
-        except Exception:
-            pass
-    return pd.DataFrame(columns=["日付", "体重", "BMI", "体脂肪率", "内臓脂肪レベル", "筋肉量", "体内水分率"])
+def sync_to_url():
+    sync_data = {"user_db": st.session_state.user_db, "records": st.session_state.records}
+    save_data_to_url(sync_data)
 
-def save_user_data(username, df):
-    csv_path = get_user_csv_path(username)
-    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
-
-# --- アプリケーションヘッダー ---
-st.title("⚖️ 高機能健康指標管理システム (保存先変更対応版)")
-
-# --- ユーザー認証・管理 ---
-if st.session_state.current_user is None:
-    # ログイン前の画面：最上部で保存先の指定を可能にする
-    with st.expander("⚙️ データの保存先設定（別のフォルダに変更したい場合）", expanded=True):
-        current_default_abs = os.path.abspath("health_app_data")
-        input_dir = st.text_input(
-            "保存先フォルダの絶対パスを入力してください（空白の場合は現在のフォルダ内に保存されます）",
-            value=st.session_state.get("custom_data_dir", "health_app_data"),
-            key="custom_data_dir_input"
-        )
-        # 入力値をセッションに同期
-        st.session_state.custom_data_dir = input_dir
-        active_dir = get_data_directory()
-        st.info(f"📁 現在有効な保存先フォルダ: `{os.path.abspath(active_dir)}`")
-
-    user_profiles = load_profiles()
-
-    st.subheader("🔑 ログイン / 新規ユーザー登録")
-    tab1, tab2 = st.tabs(["ログイン", "新規登録"])
+# --- 画面描画フロー ---
+if st.session_state.logged_in_user is None:
+    st.title("Professional Health Tracker Pro")
     
+    # 復元フォーム
+    st.subheader("データ復元（バックアップCSVをお持ちの方）")
+    uploaded_file = st.file_uploader("health_tracker_backup_xxxx.csv を選択", type=["csv"])
+    if uploaded_file is not None:
+        try:
+            content = uploaded_file.getvalue().decode("utf-8")
+            first_line = content.splitlines()[0]
+            if first_line.startswith("#BACKUP:"):
+                raw_b64 = first_line.replace("#BACKUP:", "").strip()
+                decoded_data = json.loads(base64.b64decode(raw_b64.encode()).decode())
+                st.session_state.user_db = decoded_data.get("user_db", {})
+                st.session_state.records = decoded_data.get("records", [])
+                sync_to_url()
+                st.success("復元しました。下のフォームからログインしてください。")
+        except:
+            st.error("復元エラーが発生しました。")
+
+    tab1, tab2 = st.tabs(["ログイン", "新規ユーザー登録"])
     with tab1:
-        login_name = st.text_input("ユーザー名", key="login_name")
-        login_pass = st.text_input("パスワード", type="password", key="login_pass")
-        if st.button("ログイン", key="login_btn"):
-            hashed = hash_password(login_pass)
-            if login_name in user_profiles and user_profiles[login_name]['password'] == hashed:
-                st.session_state.current_user = login_name
-                st.success(f"おかえりなさい、{login_name} さん！データを読み込みました。")
+        login_user = st.text_input("ユーザー名", key="login_username")
+        login_pass = st.text_input("パスワード", type="password", key="login_password")
+        if st.button("ログイン"):
+            if login_user in st.session_state.user_db and st.session_state.user_db[login_user]["password"] == simple_hash(login_pass):
+                st.session_state.logged_in_user = login_user
                 st.rerun()
             else:
-                st.error("ユーザー名またはパスワードが正しくありません。（保存先フォルダが合っているか確認してください）")
+                st.error("ユーザー名またはパスワードが正しくありません。")
                 
     with tab2:
-        reg_name = st.text_input("ご希望のユーザー名 (個別管理用)", key="reg_name")
-        reg_pass = st.text_input("パスワードを設定", type="password", key="reg_pass")
-        reg_height = st.number_input("身長 (cm) *必須", min_value=50.0, max_value=250.0, value=170.0, step=0.1, key="reg_height")
-        reg_target = st.number_input("目標体重 (kg) *必須", min_value=20.0, max_value=200.0, value=60.0, step=0.1, key="reg_target")
-        
-        if st.button("アカウントを作成して初期設定を完了する", key="reg_btn"):
-            if not reg_name or not reg_pass:
+        new_user = st.text_input("新規ユーザー名", key="reg_username")
+        new_pass = st.text_input("パスワード", type="password", key="reg_password")
+        height = st.number_input("身長 (cm)", min_value=50.0, max_value=250.0, value=170.00, step=0.05, format="%.2f")
+        target_weight = st.number_input("目標体重 (kg)", min_value=20.0, max_value=200.0, value=60.00, step=0.05, format="%.2f")
+        if st.button("登録"):
+            if not new_user or not new_pass:
                 st.error("すべての必須項目を入力してください。")
-            elif reg_name in user_profiles:
+            elif new_user in st.session_state.user_db:
                 st.error("このユーザー名は既に存在します。")
             else:
-                user_profiles[reg_name] = {
-                    "password": hash_password(reg_pass),
-                    "height": reg_height,
-                    "target_weight": reg_target
-                }
-                save_profiles(user_profiles)
-                # 空のCSVを初期作成
-                empty_df = pd.DataFrame(columns=["日付", "体重", "BMI", "体脂肪率", "内臓脂肪レベル", "筋肉量", "体内水分率"])
-                save_user_data(reg_name, empty_df)
-                
-                st.session_state.current_user = reg_name
-                st.success("登録完了！指定されたデータフォルダにアカウントを作成しました。")
-                st.rerun()
+                st.session_state.user_db[new_user] = {"password": simple_hash(new_pass), "height": height, "target_weight": target_weight}
+                sync_to_url()
+                st.success("登録完了。ログインしてください。")
 
 else:
-    user = st.session_state.current_user
-    user_profiles = load_profiles()
-    profile = user_profiles[user]
+    current_user = st.session_state.logged_in_user
+    user_info = st.session_state.user_db[current_user]
+    st.sidebar.title(f"ユーザー: {current_user}")
     
-    # 有効なフォルダから該当ユーザーのCSVを自動ロード
-    df_user = load_user_data(user)
+    # CSVエクスポート処理
+    user_records = [r for r in st.session_state.records if r["user"] == current_user]
+    payload_dict = {"user_db": st.session_state.user_db, "records": st.session_state.records}
+    b64_str = base64.b64encode(json.dumps(payload_dict).encode()).decode()
+    csv_data = f"#BACKUP:{b64_str}\n"
+    if user_records:
+        csv_data += pd.DataFrame(user_records).drop(columns=["user"]).to_csv(index=False)
+        
+    st.sidebar.download_button(
+        label="CSVバックアップを保存",
+        data=csv_data,
+        file_name=f"health_tracker_backup_{datetime.today().strftime('%Y%m%d')}.csv",
+        mime="text/csv"
+    )
 
-    # サイドバー：アカウント＆保存先表示
-    with st.sidebar:
-        st.markdown(f"### 👤 ログイン中: **{user}**")
-        if st.button("🔒 安全にログアウト", key="logout_btn"):
-            st.session_state.current_user = None
-            st.rerun()
-        st.markdown("---")
-        
-        # ログイン後もサイドバーから現在の保存先を確認・変更可能
-        st.markdown("### ⚙️ 現在の保存先設定")
-        input_dir_sidebar = st.text_input(
-            "保存先フォルダパス",
-            value=st.session_state.get("custom_data_dir", "health_app_data"),
-            key="custom_data_dir_sidebar"
-        )
-        if input_dir_sidebar != st.session_state.get("custom_data_dir"):
-            st.session_state.custom_data_dir = input_dir_sidebar
-            st.rerun()
-            
-        st.success(f"📁 データ保存先:\n`{os.path.abspath(get_data_directory())}`")
-
-    # メイン表示部
-    # 1. フルデータ記録 ＆ リアルタイム自動計算
-    st.subheader("📝 本日の数値を記録・更新")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        in_date = st.date_input("記録日", datetime.date.today())
-        in_weight = st.number_input("体重 (kg)", min_value=20.0, max_value=200.0, value=65.0, step=0.1)
-    with col2:
-        calc_bmi = calculate_bmi(in_weight, profile['height'])
-        st.metric(label="現在のリアルタイムBMI", value=calc_bmi)
-        in_fat = st.number_input("体脂肪率 (%)", min_value=1.0, max_value=70.0, value=20.0, step=0.1)
-    with col3:
-        in_visceral = st.number_input("内臓脂肪レベル", min_value=1, max_value=30, value=5, step=1)
-        in_muscle = st.number_input("筋肉量 (kg)", min_value=10.0, max_value=100.0, value=45.0, step=0.1)
-        in_water = st.number_input("体内水分率 (%)", min_value=10.0, max_value=90.0, value=55.0, step=0.1)
-
-    if st.button("✨ この健康指標データを安全に保存する", type="primary"):
-        new_row = {
-            "日付": str(in_date), "体重": in_weight, "BMI": calc_bmi,
-            "体脂肪率": in_fat, "内臓脂肪レベル": in_visceral, "筋肉量": in_muscle, "体内水分率": in_water
-        }
-        
-        # 上書き処理：もし同じ日付がすでに存在したら古い方を消す
-        if not df_user.empty and str(in_date) in df_user["日付"].values:
-            df_user = df_user[df_user["日付"] != str(in_date)]
-        
-        df_new = pd.concat([df_user, pd.DataFrame([new_row])], ignore_index=True).sort_values("日付")
-        
-        # 指定されたフォルダのCSVファイルに全自動上書き保存！
-        save_user_data(user, df_new)
-        st.success("データを指定フォルダに自動保存しました！")
+    if st.sidebar.button("ログアウト"):
+        st.session_state.logged_in_user = None
         st.rerun()
-
-    st.markdown("---")
-
-    # 2. ダッシュボード & 目標値の表示
-    if not df_user.empty:
-        latest = df_user.iloc[-1]
-        current_weight = latest["体重"]
-        target_weight = profile["target_weight"]
-        diff = round(current_weight - target_weight, 1)
         
-        if diff > 0:
-            st.error(f"🎯 **目標体重（{target_weight} kg）まで あと {diff} kg** です。")
-        elif diff == 0:
-            st.success(f"🎉 **目標体重（{target_weight} kg）をぴったり達成中！素晴らしい状態です！**")
+    st.title("高機能健康指標管理システム (Professional Health Tracker Pro)")
+    
+    if user_records:
+        df_alert = pd.DataFrame(user_records)
+        df_alert['date'] = pd.to_datetime(df_alert['date'])
+        latest_record = df_alert.sort_values(by='date').iloc[-1]
+        weight_diff = latest_record['weight'] - user_info['target_weight']
+        if weight_diff > 0:
+            st.warning(f"目標体重まで あと **{weight_diff:.2f} kg** です。")
+        elif weight_diff < 0:
+            st.success(f"目標体重達成中！ (目標より **{abs(weight_diff):.2f} kg** 減)")
         else:
-            st.info(f"✨ **目標体重（{target_weight} kg）をクリアしています！（マイナス {-diff} kg）**")
-
-        m1, m2, m3, m4 = st.columns(4)
-        with m1:
-            st.markdown(f'<div class="metric-card"><div class="metric-title">最新の体重</div><div class="metric-value">{current_weight} kg</div></div>', unsafe_allow_html=True)
-        with m2:
-            st.markdown(f'<div class="metric-card"><div class="metric-title">最新のBMI</div><div class="metric-value">{latest["BMI"]}</div></div>', unsafe_allow_html=True)
-        with m3:
-            st.markdown(f'<div class="metric-card"><div class="metric-title">体脂肪率</div><div class="metric-value">{latest["体脂肪率"]} %</div></div>', unsafe_allow_html=True)
-        with m4:
-            st.markdown(f'<div class="metric-card"><div class="metric-title">筋肉量</div><div class="metric-value">{latest["筋肉量"]} kg</div></div>', unsafe_allow_html=True)
-
-        st.markdown("### 📈 体重 ＆ BMI トレンド (健康ゾーン可視化)")
+            st.info("目標体重をジャストで達成しています！")
+    else:
+        st.info(f"目標体重: {user_info['target_weight']:.2f} kg (未記録)")
         
-        fig, ax1 = plt.subplots(figsize=(11, 4), dpi=150)
-        dates = pd.to_datetime(df_user["日付"])
+    with st.expander("健康指標の新規記録・編集", expanded=True):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            rec_date = st.date_input("日付", datetime.today())
+            weight = st.number_input("体重 (kg)", min_value=20.0, max_value=200.0, value=60.00, step=0.05, format="%.2f")
+        with col2:
+            fat_pct = st.number_input("体脂肪率 (%)", min_value=1.0, max_value=70.0, value=20.00, step=0.05, format="%.2f")
+            visceral = st.number_input("内臓脂肪レベル", min_value=1.0, max_value=30.0, value=5.00, step=0.05, format="%.2f")
+        with col3:
+            muscle = st.number_input("筋肉量 (kg)", min_value=10.0, max_value=100.0, value=40.00, step=0.05, format="%.2f")
+            water = st.number_input("体内水分率 (%)", min_value=10.0, max_value=90.0, value=55.00, step=0.05, format="%.2f")
+            
+        if st.button("記録を保存する"):
+            calculated_bmi = weight / ((user_info['height'] / 100) ** 2)
+            new_record = {
+                "user": current_user, "date": rec_date.strftime("%Y-%m-%d"), "weight": float(weight),
+                "bmi": float(calculated_bmi), "fat_pct": float(fat_pct), "visceral": float(visceral),
+                "muscle": float(muscle), "water": float(water)
+            }
+            st.session_state.records = [r for r in st.session_state.records if not (r["user"] == current_user and r["date"] == new_record["date"])]
+            st.session_state.records.append(new_record)
+            sync_to_url()
+            st.success("データを同期保存しました。")
+            st.rerun()
+
+    if user_records:
+        df = pd.DataFrame(user_records)
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.sort_values(by='date').reset_index(drop=True)
         
-        color1 = '#1f77b4'
-        ax1.set_ylabel('Weight (kg)', color=color1, fontweight='bold')
+        st.subheader("履歴データ一覧")
+        st.dataframe(df.drop(columns=["user"]), use_container_width=True)
+        
+        st.subheader("グラフトレンド（横長2段構成）")
+        try:
+            draw_charts(df)
+        except Exception as chart_err:
+            st.error(f"グラフ描画エラー: {chart_err}")
+    else:
+        st.info("データがありません。")
