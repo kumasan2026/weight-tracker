@@ -7,8 +7,12 @@ import binascii
 import hashlib
 import hmac
 import math
+import os
+import re
 import secrets
+import sqlite3
 from datetime import datetime
+from pathlib import Path
 
 # ==========================================
 # 1. ユーティリティ・データ処理関数
@@ -16,6 +20,13 @@ from datetime import datetime
 
 DEFAULT_PASSWORD = "puca"
 PASSWORD_HASH_ITERATIONS = 310_000
+PASSWORD_DB_PATH = Path(
+    os.environ.get(
+        "BODYMETRICS_AUTH_DB",
+        str(Path(__file__).with_name("bodymetrics_auth.sqlite3")),
+    )
+)
+# In production, point BODYMETRICS_AUTH_DB at a writable persistent volume.
 
 
 def encode_data(data_dict):
@@ -50,8 +61,171 @@ def create_password_hash(password):
     }
 
 
+def initialize_password_store():
+    PASSWORD_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(PASSWORD_DB_PATH, timeout=15)
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_credentials (
+                username TEXT PRIMARY KEY,
+                password_salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                password_iterations INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS health_records (
+                username TEXT PRIMARY KEY,
+                records_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def load_persistent_password(username):
+    connection = sqlite3.connect(PASSWORD_DB_PATH, timeout=15)
+    try:
+        row = connection.execute(
+            """
+            SELECT password_salt, password_hash, password_iterations
+            FROM auth_credentials
+            WHERE username = ?
+            """,
+            (username,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    if row is None:
+        return None
+    return {
+        "password_salt": row[0],
+        "password_hash": row[1],
+        "password_iterations": row[2],
+    }
+
+
+def save_persistent_password(username, password_record):
+    connection = sqlite3.connect(PASSWORD_DB_PATH, timeout=15)
+    try:
+        connection.execute(
+            """
+            INSERT INTO auth_credentials (
+                username,
+                password_salt,
+                password_hash,
+                password_iterations,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(username) DO UPDATE SET
+                password_salt = excluded.password_salt,
+                password_hash = excluded.password_hash,
+                password_iterations = excluded.password_iterations,
+                updated_at = excluded.updated_at
+            """,
+            (
+                username,
+                password_record["password_salt"],
+                password_record["password_hash"],
+                password_record["password_iterations"],
+                datetime.now().astimezone().isoformat(),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def register_persistent_account(username, password_record):
+    connection = sqlite3.connect(PASSWORD_DB_PATH, timeout=15)
+    try:
+        connection.execute(
+            """
+            INSERT INTO auth_credentials (
+                username,
+                password_salt,
+                password_hash,
+                password_iterations,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                username,
+                password_record["password_salt"],
+                password_record["password_hash"],
+                password_record["password_iterations"],
+                datetime.now().astimezone().isoformat(),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def load_persistent_records(username):
+    connection = sqlite3.connect(PASSWORD_DB_PATH, timeout=15)
+    try:
+        row = connection.execute(
+            "SELECT records_json FROM health_records WHERE username = ?",
+            (username,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    if row is None:
+        return []
+    try:
+        stored_records = json.loads(row[0])
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("保存済みの健康記録データを読み取れません。") from exc
+    return normalize_records(stored_records)
+
+
+def save_persistent_records(username, records):
+    normalized_records = normalize_records(records)
+    records_json = json.dumps(
+        normalized_records,
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    connection = sqlite3.connect(PASSWORD_DB_PATH, timeout=15)
+    try:
+        connection.execute(
+            """
+            INSERT INTO health_records (username, records_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(username) DO UPDATE SET
+                records_json = excluded.records_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                username,
+                records_json,
+                datetime.now().astimezone().isoformat(),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def has_saved_password(user_db):
-    account = user_db.get("tomato", {})
+    return has_saved_password_for_user(user_db, "tomato")
+
+
+def has_saved_password_for_user(user_db, username):
+    account = user_db.get(username, {})
     return any(
         key in account
         for key in ("password_salt", "password_hash", "password_iterations")
@@ -59,12 +233,12 @@ def has_saved_password(user_db):
 
 
 def verify_login(username, password, user_db):
-    if username != "tomato":
+    if not isinstance(username, str) or not username:
         return False
 
-    account = user_db.get("tomato", {})
-    if not has_saved_password(user_db):
-        return password == DEFAULT_PASSWORD
+    account = user_db.get(username, {})
+    if not has_saved_password_for_user(user_db, username):
+        return username == "tomato" and password == DEFAULT_PASSWORD
 
     try:
         salt = bytes.fromhex(account["password_salt"])
@@ -104,14 +278,13 @@ def normalize_user_db(user_db):
     if not isinstance(user_db, dict):
         raise ValueError("ユーザー設定データの形式が正しくありません。")
 
-    account = user_db.get("tomato", {})
-    if not isinstance(account, dict):
-        raise ValueError("ユーザー設定データの形式が正しくありません。")
-
     normalized_user_db = dict(user_db)
-    normalized_account = dict(account)
-    normalized_account.pop("password", None)
-    normalized_user_db["tomato"] = normalized_account
+    for username, account in user_db.items():
+        if not isinstance(username, str) or not isinstance(account, dict):
+            raise ValueError("ユーザー設定データの形式が正しくありません。")
+        normalized_account = dict(account)
+        normalized_account.pop("password", None)
+        normalized_user_db[username] = normalized_account
     return normalized_user_db
 
 
@@ -198,6 +371,12 @@ def numeric_series(frame, column):
 # ==========================================
 
 st.set_page_config(page_title="BodyMetrics - 統合健康管理システム", layout="wide")
+try:
+    initialize_password_store()
+except (OSError, sqlite3.Error) as exc:
+    st.error(f"パスワード保存領域を初期化できません: {exc}")
+    st.stop()
+
 st.title("📊 BodyMetrics ／ 統合健康管理システム")
 
 # トラブルの原因だった位置固定用のCSSを廃止し、文字サイズと余白の調整のみに限定
@@ -251,6 +430,50 @@ st.markdown("""
     [data-testid="stTable"] *, [data-testid="stDataFrame"] * {
         font-size: 1.25rem !important;
     }
+
+    /* 履歴CSVアップローダーをコンパクトな横長バーにする */
+    .st-key-history_backup_uploader [data-testid="stFileUploader"] {
+        padding: 0 !important;
+        margin: 0 !important;
+    }
+
+    .st-key-history_backup_uploader [data-testid="stFileUploaderDropzone"] {
+        box-sizing: border-box !important;
+        min-height: 52px !important;
+        padding: 6px 12px !important;
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 10px !important;
+    }
+
+    .st-key-history_backup_uploader [data-testid="stFileUploaderDropzone"] section,
+    .st-key-history_backup_uploader [data-testid="stFileUploaderDropzone"] small {
+        display: none !important;
+    }
+
+    .st-key-history_backup_uploader [data-testid="stFileUploaderDropzone"] button {
+        box-sizing: border-box !important;
+        width: 100% !important;
+        min-height: 38px !important;
+        padding: 8px 12px !important;
+        border: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+        color: transparent !important;
+        font-size: 0 !important;
+        line-height: 0 !important;
+    }
+
+    .st-key-history_backup_uploader [data-testid="stFileUploaderDropzone"] button::after {
+        content: "📥 過去データを読み込む";
+        color: #31333F !important;
+        font-size: 14px !important;
+        font-weight: 700 !important;
+        line-height: 1.2 !important;
+        white-space: nowrap !important;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -261,69 +484,119 @@ if "user" not in st.session_state:
     st.session_state.user = {}
 
 is_logged_in = "username" in st.session_state.user
-pending_records = None
-pending_user_db = None
-pending_restore_error = None
 
 if not is_logged_in:
-    saved_data = st.query_params.get("health_data", "")
-    if saved_data:
+    def sign_in(username, password):
+        username = username.strip()
         try:
-            saved_payload = decode_data(saved_data)
-            pending_user_db = normalize_user_db(saved_payload.get("user_db"))
-        except (TypeError, ValueError) as exc:
-            pending_restore_error = str(exc)
+            persistent_password = load_persistent_password(username)
+        except sqlite3.Error as exc:
+            st.error(f"保存済みパスワードを読み込めません: {exc}")
+            return
 
-if not is_logged_in:
-    st.subheader("ログイン / バックアップ復元")
-    st.caption("健康データはURLにBase64形式で保存されます。暗号化ではないため、URLを他人と共有しないでください。")
-
-    if pending_restore_error:
-        st.error(f"URLに保存されたデータを復元できません: {pending_restore_error}")
-    
-    uploaded_file = st.file_uploader("バックアップCSVファイルをここにドラッグ＆ドロップ", type=["csv"])
-    if uploaded_file is not None:
         try:
-            restored = parse_backup_csv(uploaded_file)
-            if restored is None or "records" not in restored:
-                raise ValueError("CSVに有効な #BACKUP データがありません。")
-            restored_records = normalize_records(restored["records"])
-            restored_user_db = normalize_user_db(restored.get("user_db"))
-            restored_user_db.setdefault(
-                "tomato",
-                {"height": 174.0, "target_weight": 65.0},
+            records = load_persistent_records(username)
+        except ValueError as exc:
+            st.error(f"記録データを読み込めません: {exc}")
+            return
+        except sqlite3.Error as exc:
+            st.error(f"保存済みの健康記録を読み込めません: {exc}")
+            return
+
+        account = {}
+        if persistent_password is not None:
+            account.update(persistent_password)
+        login_user_db = {username: account}
+
+        if not verify_login(username, password, login_user_db):
+            st.error("ユーザー名またはパスワードが正しくありません。")
+            return
+
+        if persistent_password is None:
+            password_record = (
+                account
+                if has_saved_password_for_user(login_user_db, username)
+                else create_password_hash(password)
             )
-            pending_records = restored_records
-            pending_user_db = restored_user_db
-            st.info("バックアップを読み込みました。ユーザー名とパスワードを入力して復元してください。")
-        except (OSError, TypeError, ValueError) as exc:
-            st.error(f"バックアップを復元できません: {exc}")
+            try:
+                save_persistent_password(username, password_record)
+            except (OSError, sqlite3.Error) as exc:
+                st.error(f"パスワードを永続保存できません: {exc}")
+                return
+            account.update(password_record)
 
-    with st.form("login"):
-        user_input = st.text_input("ユーザー名", value="tomato")
-        pass_input = st.text_input("パスワード", type="password")
-        if st.form_submit_button("サインイン"):
-            login_user_db = pending_user_db or {
-                "tomato": {"height": 174.0, "target_weight": 65.0}
-            }
-            if not verify_login(user_input, pass_input, login_user_db):
-                st.error("ユーザー名またはパスワードが正しくありません。")
-            elif pending_restore_error:
-                st.error("保存データを復元できないため、先にバックアップCSVを復元してください。")
+        st.session_state.user = {
+            "username": username,
+            "data": records,
+            "user_db": {username: account},
+        }
+        st.query_params["health_data"] = encode_data(
+            build_save_payload(st.session_state.user)
+        )
+        st.rerun()
+
+    st.subheader("ログイン / アカウント作成")
+    st.caption("健康記録はアカウントごとに自動保存され、ログイン時に読み込まれます。")
+    login_tab, register_tab = st.tabs(["通常ログイン", "新規アカウント登録"])
+
+    with login_tab:
+        with st.form("login_form"):
+            user_input = st.text_input("ユーザー名", value="tomato", key="login_username")
+            pass_input = st.text_input(
+                "パスワード",
+                type="password",
+                key="login_password",
+            )
+            login_submitted = st.form_submit_button("サインイン")
+        if login_submitted:
+            sign_in(user_input, pass_input)
+
+    with register_tab:
+        with st.form("register_form"):
+            new_username = st.text_input(
+                "希望のユーザー名",
+                key="register_username",
+            )
+            new_password = st.text_input(
+                "パスワード",
+                type="password",
+                key="register_password",
+            )
+            confirm_password = st.text_input(
+                "パスワード（確認）",
+                type="password",
+                key="register_password_confirm",
+            )
+            registration_submitted = st.form_submit_button("登録する")
+
+        if registration_submitted:
+            new_username = new_username.strip()
+            if not re.fullmatch(r"[\w.-]{3,32}", new_username, flags=re.UNICODE):
+                st.error("ユーザー名は3〜32文字で入力してください（文字・数字・._- が使用できます）。")
+            elif new_username == "tomato":
+                st.error("このユーザー名はすでに使用されています。")
+            elif len(new_password) < 8:
+                st.error("パスワードは8文字以上で入力してください。")
+            elif new_password != confirm_password:
+                st.error("パスワードが一致しません。")
             else:
-                if not has_saved_password(login_user_db):
-                    login_user_db["tomato"].update(
-                        create_password_hash(DEFAULT_PASSWORD)
+                password_record = create_password_hash(new_password)
+                try:
+                    register_persistent_account(new_username, password_record)
+                except sqlite3.IntegrityError:
+                    st.error("このユーザー名はすでに使用されています。")
+                except (OSError, sqlite3.Error) as exc:
+                    st.error(f"アカウントを保存できません: {exc}")
+                else:
+                    st.session_state.user = {
+                        "username": new_username,
+                        "data": [],
+                        "user_db": {new_username: password_record},
+                    }
+                    st.query_params["health_data"] = encode_data(
+                        build_save_payload(st.session_state.user)
                     )
-                st.session_state.user = {
-                    "username": user_input,
-                    "data": pending_records if pending_records is not None else [],
-                    "user_db": login_user_db,
-                }
-                st.query_params["health_data"] = encode_data(
-                    build_save_payload(st.session_state.user)
-                )
-                st.rerun()
+                    st.rerun()
 else:
     user_info = st.session_state.user
     try:
@@ -361,22 +634,37 @@ else:
         return default if value is None else value
 
     with st.sidebar.form("password_change_form"):
-        new_password = st.text_input("新しいパスワード", type="password")
-        confirm_password = st.text_input("新しいパスワード（確認）", type="password")
+        new_password = st.text_input(
+            "新しいパスワード",
+            type="password",
+            key="new_password_input",
+        )
+        confirm_password = st.text_input(
+            "新しいパスワード（確認）",
+            type="password",
+            key="confirm_password_input",
+        )
         if st.form_submit_button("パスワードを更新する"):
             if not new_password:
                 st.error("新しいパスワードを入力してください。")
             elif new_password != confirm_password:
                 st.error("新しいパスワードが一致しません。")
             else:
-                user_info["user_db"].setdefault("tomato", {}).update(
-                    create_password_hash(new_password)
-                )
-                st.session_state.user = user_info
-                st.query_params["health_data"] = encode_data(
-                    build_save_payload(user_info)
-                )
-                st.sidebar.success("パスワードを更新しました。")
+                username = user_info["username"]
+                password_record = create_password_hash(new_password)
+                try:
+                    save_persistent_password(username, password_record)
+                except (OSError, sqlite3.Error) as exc:
+                    st.sidebar.error(f"パスワードを永続保存できません: {exc}")
+                else:
+                    user_info["user_db"].setdefault(username, {}).update(
+                        password_record
+                    )
+                    st.session_state.user = user_info
+                    st.query_params["health_data"] = encode_data(
+                        build_save_payload(user_info)
+                    )
+                    st.sidebar.success("パスワードを更新しました。")
     
     if st.sidebar.button("サインアウト"):
         st.session_state.user = {}
@@ -432,8 +720,18 @@ else:
             
             if st.form_submit_button("保存"):
                 new_data = {"date": str(d), "weight": w, "bmi": b, "fat_pct": f, "visceral": v, "muscle": m, "water": wat}
-                user_info["data"] = [r for r in user_info["data"] if r["date"] != str(d)] + [new_data]
-                user_info["data"].sort(key=lambda x: x["date"], reverse=True)
+                updated_records = [
+                    record
+                    for record in user_info["data"]
+                    if record["date"] != str(d)
+                ] + [new_data]
+                updated_records.sort(key=lambda record: record["date"], reverse=True)
+                try:
+                    save_persistent_records(user_info["username"], updated_records)
+                except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+                    st.error(f"健康記録を永続保存できません: {exc}")
+                    st.stop()
+                user_info["data"] = updated_records
                 st.session_state.user = user_info
                 
                 st.query_params["health_data"] = encode_data(
@@ -456,9 +754,10 @@ else:
         )
 
         uploaded_backup = st.file_uploader(
-            "バックアップCSVファイルを読み込む",
+            "過去データを読み込む",
             type=["csv"],
             key="history_backup_uploader",
+            label_visibility="collapsed",
         )
 
         if uploaded_backup is None:
@@ -472,13 +771,15 @@ else:
                     restored = parse_backup_csv(uploaded_backup)
                     if restored is None or "records" not in restored:
                         raise ValueError("CSVに有効な #BACKUP データがありません。")
-                    user_info["data"] = normalize_records(restored["records"])
+                    restored_records = normalize_records(restored["records"])
+                    save_persistent_records(user_info["username"], restored_records)
+                    user_info["data"] = restored_records
                     st.session_state.user = user_info
                     st.query_params["health_data"] = encode_data(
                         build_save_payload(user_info)
                     )
                     st.rerun()
-                except (OSError, TypeError, ValueError) as exc:
+                except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
                     st.error(f"バックアップを読み込めません: {exc}")
 
         if user_info["data"]:
