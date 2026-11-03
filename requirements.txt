@@ -3,3 +3,4 @@ pandas
 matplotlib
 plotly
 httpx
+python-dotenv
