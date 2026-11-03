@@ -11,29 +11,39 @@ import math
 import os
 import re
 import secrets
+import os
+import json
+import base64
+import binascii
 import sqlite3
+import httpx
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
+
+# --- ここからクラウド（Supabase）に繋ぐための新しい設定 ---
+from dotenv import load_dotenv
+from postgrest.exceptions import APIError
+from supabase import create_client, Client, SupabaseException
+
+load_dotenv()
+
+SUPABASE_URL = "https://tmcpcssxsdbehduhhfvz.supabase.co"
+SUPABASE_KEY = "sb_publishable_TPJL-EFIFxof5cjuQurivA_Qi6rSGmE"
+# --- ここまで ---
 
 # ==========================================
 # 1. ユーティリティ・データ処理関数
 # ==========================================
 
-DEFAULT_PASSWORD = "puca"
 PASSWORD_HASH_ITERATIONS = 310_000
-PASSWORD_DB_PATH = Path(
-    os.environ.get(
-        "BODYMETRICS_AUTH_DB",
-        str(Path(__file__).with_name("bodymetrics_auth.sqlite3")),
-    )
-)
+
 # In production, point BODYMETRICS_AUTH_DB at a writable persistent volume.
 
 
 def encode_data(data_dict):
     json_str = json.dumps(data_dict, ensure_ascii=False, allow_nan=False)
     return base64.b64encode(json_str.encode("utf-8")).decode("ascii")
-
 
 def decode_data(encoded_data):
     padded_data = encoded_data + "=" * (-len(encoded_data) % 4)
@@ -63,133 +73,62 @@ def create_password_hash(password):
 
 
 def initialize_password_store():
-    PASSWORD_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(PASSWORD_DB_PATH, timeout=15)
-    try:
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS auth_credentials (
-                username TEXT PRIMARY KEY,
-                password_salt TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
-                password_iterations INTEGER NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS health_records (
-                username TEXT PRIMARY KEY,
-                records_json TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-        connection.commit()
-    finally:
-        connection.close()
+    # Supabaseではブラウザ画面でテーブルを作成するため、プログラム側での初期化は不要です
+    pass
 
 
 def load_persistent_password(username):
-    connection = sqlite3.connect(PASSWORD_DB_PATH, timeout=15)
-    try:
-        row = connection.execute(
-            """
-            SELECT password_salt, password_hash, password_iterations
-            FROM auth_credentials
-            WHERE username = ?
-            """,
-            (username,),
-        ).fetchone()
-    finally:
-        connection.close()
-
-    if row is None:
+    response = (
+        supabase.table("auth_credentials")
+        .select("password_salt, password_hash, password_iterations")
+        .eq("username", username)
+        .limit(1)
+        .execute()
+    )
+    if not response.data:
         return None
+    row = response.data[0]
     return {
-        "password_salt": row[0],
-        "password_hash": row[1],
-        "password_iterations": row[2],
+        "password_salt": row["password_salt"],
+        "password_hash": row["password_hash"],
+        "password_iterations": row["password_iterations"],
     }
 
 
 def save_persistent_password(username, password_record):
-    connection = sqlite3.connect(PASSWORD_DB_PATH, timeout=15)
-    try:
-        connection.execute(
-            """
-            INSERT INTO auth_credentials (
-                username,
-                password_salt,
-                password_hash,
-                password_iterations,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(username) DO UPDATE SET
-                password_salt = excluded.password_salt,
-                password_hash = excluded.password_hash,
-                password_iterations = excluded.password_iterations,
-                updated_at = excluded.updated_at
-            """,
-            (
-                username,
-                password_record["password_salt"],
-                password_record["password_hash"],
-                password_record["password_iterations"],
-                datetime.now().astimezone().isoformat(),
-            ),
-        )
-        connection.commit()
-    finally:
-        connection.close()
+    supabase.table("auth_credentials").upsert(
+        {
+            "username": username,
+            "password_salt": password_record["password_salt"],
+            "password_hash": password_record["password_hash"],
+            "password_iterations": password_record["password_iterations"],
+            "updated_at": datetime.now().astimezone().isoformat(),
+        },
+        on_conflict="username",
+    ).execute()
 
 
 def register_persistent_account(username, password_record):
-    connection = sqlite3.connect(PASSWORD_DB_PATH, timeout=15)
-    try:
-        connection.execute(
-            """
-            INSERT INTO auth_credentials (
-                username,
-                password_salt,
-                password_hash,
-                password_iterations,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                username,
-                password_record["password_salt"],
-                password_record["password_hash"],
-                password_record["password_iterations"],
-                datetime.now().astimezone().isoformat(),
-            ),
-        )
-        connection.commit()
-    finally:
-        connection.close()
+    supabase.table("auth_credentials").insert({
+        "username": username,
+        "password_salt": password_record["password_salt"],
+        "password_hash": password_record["password_hash"],
+        "password_iterations": password_record["password_iterations"],
+        "updated_at": datetime.now().astimezone().isoformat()
+    }).execute()
 
 
 def load_persistent_records(username):
-    connection = sqlite3.connect(PASSWORD_DB_PATH, timeout=15)
-    try:
-        row = connection.execute(
-            "SELECT records_json FROM health_records WHERE username = ?",
-            (username,),
-        ).fetchone()
-    finally:
-        connection.close()
-
-    if row is None:
+    response = (
+        supabase.table("health_records")
+        .select("records_json")
+        .eq("username", username)
+        .limit(1)
+        .execute()
+    )
+    if not response.data:
         return []
-    try:
-        stored_records = json.loads(row[0])
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise ValueError("保存済みの健康記録データを読み取れません。") from exc
+    stored_records = json.loads(response.data[0]["records_json"])
     return normalize_records(stored_records)
 
 
@@ -200,37 +139,13 @@ def save_persistent_records(username, records):
         ensure_ascii=False,
         allow_nan=False,
     )
-    connection = sqlite3.connect(PASSWORD_DB_PATH, timeout=15)
-    try:
-        connection.execute(
-            """
-            INSERT INTO health_records (username, records_json, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(username) DO UPDATE SET
-                records_json = excluded.records_json,
-                updated_at = excluded.updated_at
-            """,
-            (
-                username,
-                records_json,
-                datetime.now().astimezone().isoformat(),
-            ),
-        )
-        connection.commit()
-    finally:
-        connection.close()
+    supabase.table("health_records").upsert({
+        "username": username,
+        "records_json": records_json,
+        "updated_at": datetime.now().astimezone().isoformat()
+    }).execute()
 
 
-def has_saved_password(user_db):
-    return has_saved_password_for_user(user_db, "tomato")
-
-
-def has_saved_password_for_user(user_db, username):
-    account = user_db.get(username, {})
-    return any(
-        key in account
-        for key in ("password_salt", "password_hash", "password_iterations")
-    )
 
 
 def verify_login(username, password, user_db):
@@ -238,9 +153,6 @@ def verify_login(username, password, user_db):
         return False
 
     account = user_db.get(username, {})
-    if not has_saved_password_for_user(user_db, username):
-        return username == "tomato" and password == DEFAULT_PASSWORD
-
     try:
         salt = bytes.fromhex(account["password_salt"])
         expected_hash = bytes.fromhex(account["password_hash"])
@@ -372,6 +284,26 @@ def numeric_series(frame, column):
 # ==========================================
 
 st.set_page_config(page_title="BodyMetrics", layout="wide")
+
+if (
+    not SUPABASE_URL.strip()
+    or not SUPABASE_KEY.strip()
+    or SUPABASE_URL == "あなたのSupabaseのURL"
+    or SUPABASE_KEY == "あなたのSupabaseのKEY"
+):
+    st.error(
+        "Supabaseの接続情報が未設定です。app.py の SUPABASE_URL / "
+        "SUPABASE_KEY に実際の値を設定するか、同名の環境変数を設定してください。"
+    )
+    st.stop()
+
+supabase_url_parts = urlparse(SUPABASE_URL)
+if supabase_url_parts.scheme not in ("http", "https") or not supabase_url_parts.netloc:
+    st.error("SUPABASE_URL は http:// または https:// から始まる有効なURLにしてください。")
+    st.stop()
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 try:
     initialize_password_store()
 except (OSError, sqlite3.Error) as exc:
@@ -415,6 +347,8 @@ if not st.session_state.user:
                 "data": normalize_records(restored_payload["records"]),
                 "user_db": restored_user_db,
             }
+        except (APIError, SupabaseException, httpx.HTTPError) as exc:
+            st.error(f"Supabaseのパスワードを確認できません: {exc}")
         except sqlite3.Error as exc:
             st.error(f"保存済みパスワードを確認できません: {exc}")
         except (TypeError, ValueError) as exc:
@@ -435,6 +369,14 @@ st.markdown("""
         font-weight: bold !important;
         color: #111111 !important;
         margin-bottom: 15px !important;
+        white-space: nowrap !important;
+        word-break: keep-all !important;
+    }
+
+    h1 {
+        white-space: nowrap !important;
+        word-break: keep-all !important;
+        font-size: clamp(1.7rem, 2.4vw, 2.5rem) !important;
     }
     
     /* 入力項目のラベル文字 */
@@ -457,6 +399,25 @@ st.markdown("""
         font-weight: bold !important;
         padding: 8px 20px !important;
         white-space: nowrap !important;
+        word-break: keep-all !important;
+    }
+
+    .st-key-save_daily_record button {
+        font-size: 0.75rem !important;
+        padding: 5px 6px !important;
+    }
+
+    .st-key-history_heading h2,
+    .st-key-history_heading h3 {
+        font-size: 1.15rem !important;
+        white-space: nowrap !important;
+        word-break: keep-all !important;
+    }
+
+    .st-key-save_daily_record,
+    .st-key-history_backup_uploader,
+    .st-key-history_heading {
+        min-width: 0 !important;
     }
 
     /* 本日の記録フォームの外枠 */
@@ -472,48 +433,9 @@ st.markdown("""
         font-size: 1.25rem !important;
     }
 
-    /* 履歴CSVアップローダーをコンパクトな横長バーにする */
-    .st-key-history_backup_uploader [data-testid="stFileUploader"] {
-        padding: 0 !important;
-        margin: 0 !important;
-    }
-
-    .st-key-history_backup_uploader [data-testid="stFileUploaderDropzone"] {
-        box-sizing: border-box !important;
-        min-height: 52px !important;
-        padding: 6px 12px !important;
-        display: flex !important;
-        flex-direction: row !important;
-        align-items: center !important;
-        justify-content: center !important;
-        gap: 10px !important;
-    }
-
-    .st-key-history_backup_uploader [data-testid="stFileUploaderDropzone"] section,
+    /* CSV読み込み上限の補助表示だけを隠す */
     .st-key-history_backup_uploader [data-testid="stFileUploaderDropzone"] small {
         display: none !important;
-    }
-
-    .st-key-history_backup_uploader [data-testid="stFileUploaderDropzone"] button {
-        box-sizing: border-box !important;
-        width: 100% !important;
-        min-height: 38px !important;
-        padding: 8px 12px !important;
-        border: 0 !important;
-        background: transparent !important;
-        box-shadow: none !important;
-        color: transparent !important;
-        font-size: 0 !important;
-        line-height: 0 !important;
-    }
-
-    .st-key-history_backup_uploader [data-testid="stFileUploaderDropzone"] button::after {
-        content: "📥 過去データを読み込む";
-        color: #31333F !important;
-        font-size: 14px !important;
-        font-weight: 700 !important;
-        line-height: 1.2 !important;
-        white-space: nowrap !important;
     }
 
     .user-header-name {
@@ -542,23 +464,24 @@ initial_records = []
 is_logged_in = "username" in st.session_state.user
 
 if is_logged_in:
-    title_col, header_user_col = st.columns([4, 2])
+    title_col, header_name_col, header_logout_col, _ = st.columns(
+        [3.3, 1.7, 1.7, 3.3],
+        vertical_alignment="center",
+    )
     with title_col:
         st.title("📊 BodyMetrics")
-    with header_user_col:
-        name_col, logout_col = st.columns([1.6, 1])
-        with name_col:
-            st.markdown(
-                '<div class="user-header-name">👤 '
-                f'{html.escape(st.session_state.user["username"])}</div>',
-                unsafe_allow_html=True,
-            )
-        with logout_col:
-            logout_clicked = st.button(
-                "ログアウト",
-                key="logout_button",
-                use_container_width=True,
-            )
+    with header_name_col:
+        st.markdown(
+            '<div class="user-header-name">👤 '
+            f'{html.escape(st.session_state.user["username"])}</div>',
+            unsafe_allow_html=True,
+        )
+    with header_logout_col:
+        logout_clicked = st.button(
+            "ログアウト",
+            key="logout_button",
+            use_container_width=True,
+        )
     if logout_clicked:
         st.session_state.user = {}
         if "health_data" in st.query_params:
@@ -572,8 +495,22 @@ if not is_logged_in:
         username = username.strip()
         try:
             persistent_password = load_persistent_password(username)
+        except (APIError, SupabaseException, httpx.HTTPError) as exc:
+            st.error(f"Supabaseのパスワードを読み込めません: {exc}")
+            return
         except sqlite3.Error as exc:
             st.error(f"保存済みパスワードを読み込めません: {exc}")
+            return
+
+        if persistent_password is None:
+            st.error("ユーザー名またはパスワードが正しくありません。")
+            return
+
+        account = dict(persistent_password)
+        login_user_db = {username: account}
+
+        if not verify_login(username, password, login_user_db):
+            st.error("ユーザー名またはパスワードが正しくありません。")
             return
 
         try:
@@ -581,31 +518,12 @@ if not is_logged_in:
         except ValueError as exc:
             st.error(f"記録データを読み込めません: {exc}")
             return
+        except (APIError, SupabaseException, httpx.HTTPError, json.JSONDecodeError) as exc:
+            st.error(f"Supabaseから健康記録を読み込めません: {exc}")
+            return
         except sqlite3.Error as exc:
             st.error(f"保存済みの健康記録を読み込めません: {exc}")
             return
-
-        account = {}
-        if persistent_password is not None:
-            account.update(persistent_password)
-        login_user_db = {username: account}
-
-        if not verify_login(username, password, login_user_db):
-            st.error("ユーザー名またはパスワードが正しくありません。")
-            return
-
-        if persistent_password is None:
-            password_record = (
-                account
-                if has_saved_password_for_user(login_user_db, username)
-                else create_password_hash(password)
-            )
-            try:
-                save_persistent_password(username, password_record)
-            except (OSError, sqlite3.Error) as exc:
-                st.error(f"パスワードを永続保存できません: {exc}")
-                return
-            account.update(password_record)
 
         st.session_state.user = {
             "username": username,
@@ -704,6 +622,7 @@ else:
                     "visceral",
                     "muscle",
                     "water",
+                    "notes",
                 )
             ],
             allow_nan=False,
@@ -735,12 +654,29 @@ else:
                 password_record = create_password_hash(new_password)
                 try:
                     save_persistent_password(username, password_record)
+                    persisted_password = load_persistent_password(username)
+                    if (
+                        persisted_password is None
+                        or not hmac.compare_digest(
+                            persisted_password["password_salt"],
+                            password_record["password_salt"],
+                        )
+                        or not hmac.compare_digest(
+                            persisted_password["password_hash"],
+                            password_record["password_hash"],
+                        )
+                        or persisted_password["password_iterations"]
+                        != password_record["password_iterations"]
+                    ):
+                        raise ValueError("保存後のパスワード情報を確認できません。")
+                except (APIError, SupabaseException, httpx.HTTPError) as exc:
+                    st.sidebar.error(f"Supabaseへパスワードを保存できません: {exc}")
                 except (OSError, sqlite3.Error) as exc:
                     st.sidebar.error(f"パスワードを永続保存できません: {exc}")
+                except (KeyError, TypeError, ValueError) as exc:
+                    st.sidebar.error(f"パスワード更新を確認できません: {exc}")
                 else:
-                    user_info["user_db"].setdefault(username, {}).update(
-                        password_record
-                    )
+                    user_info["user_db"][username] = dict(persisted_password)
                     st.session_state.user = user_info
                     st.query_params["health_data"] = encode_data(
                         build_save_payload(user_info)
@@ -751,95 +687,128 @@ else:
     if st.session_state.pop("password_change_success", False):
         st.sidebar.success("パスワードを更新しました。")
 
-    # 【確実なレイアウト修正】「本日の記録」側を細め（2）に固定し、「履歴データ」側を広め（3）に指定
     col1, col2 = st.columns([1.8, 3.2])
     
     with col1:
         st.subheader("本日の記録")
-        with st.form("input_form"):
-            date_label, date_input = st.columns([1, 2])
-            with date_label:
-                st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>日付</div>", unsafe_allow_html=True)
-            with date_input:
-                d = st.date_input("日付", datetime.today(), label_visibility="collapsed")
+        date_label, date_input = st.columns([1, 2])
+        with date_label:
+            st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>日付</div>", unsafe_allow_html=True)
+        with date_input:
+            d = st.date_input("日付", datetime.today(), label_visibility="collapsed")
 
-            weight_label, weight_input = st.columns([1, 2])
-            with weight_label:
-                st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>体重 (kg)</div>", unsafe_allow_html=True)
-            with weight_input:
-                w = st.number_input("体重 (kg)", value=latest_measurement("weight", 70.0), step=0.05, format="%.2f", label_visibility="collapsed", key=f"weight_{latest_record_key}")
+        weight_label, weight_input = st.columns([1, 2])
+        with weight_label:
+            st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>体重 (kg)</div>", unsafe_allow_html=True)
+        with weight_input:
+            w = st.number_input("体重 (kg)", value=latest_measurement("weight", 70.0), step=0.05, format="%.2f", label_visibility="collapsed", key=f"weight_{latest_record_key}")
 
-            bmi_label, bmi_input = st.columns([1, 2])
-            with bmi_label:
-                st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>BMI</div>", unsafe_allow_html=True)
-            with bmi_input:
-                b = st.number_input("BMI", value=latest_measurement("bmi", 22.0), step=0.05, format="%.2f", label_visibility="collapsed", key=f"bmi_{latest_record_key}")
+        bmi_label, bmi_input = st.columns([1, 2])
+        with bmi_label:
+            st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>BMI</div>", unsafe_allow_html=True)
+        with bmi_input:
+            b = st.number_input("BMI", value=latest_measurement("bmi", 22.0), step=0.05, format="%.2f", label_visibility="collapsed", key=f"bmi_{latest_record_key}")
 
-            fat_label, fat_input = st.columns([1, 2])
-            with fat_label:
-                st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>体脂肪率 (%)</div>", unsafe_allow_html=True)
-            with fat_input:
-                f = st.number_input("体脂肪率 (%)", value=latest_measurement("fat_pct", 20.0), step=0.05, format="%.2f", label_visibility="collapsed", key=f"fat_{latest_record_key}")
+        fat_label, fat_input = st.columns([1, 2])
+        with fat_label:
+            st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>体脂肪率 (%)</div>", unsafe_allow_html=True)
+        with fat_input:
+            f = st.number_input("体脂肪率 (%)", value=latest_measurement("fat_pct", 20.0), step=0.05, format="%.2f", label_visibility="collapsed", key=f"fat_{latest_record_key}")
 
-            visceral_label, visceral_input = st.columns([1, 2])
-            with visceral_label:
-                st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>内臓脂肪レベル</div>", unsafe_allow_html=True)
-            with visceral_input:
-                v = st.number_input("内臓脂肪レベル", value=latest_measurement("visceral", 5.0), step=0.05, format="%.2f", label_visibility="collapsed", key=f"visceral_{latest_record_key}")
+        visceral_label, visceral_input = st.columns([1, 2])
+        with visceral_label:
+            st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>内臓脂肪レベル</div>", unsafe_allow_html=True)
+        with visceral_input:
+            v = st.number_input("内臓脂肪レベル", value=latest_measurement("visceral", 5.0), step=0.05, format="%.2f", label_visibility="collapsed", key=f"visceral_{latest_record_key}")
 
-            muscle_label, muscle_input = st.columns([1, 2])
-            with muscle_label:
-                st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>筋肉量 (kg)</div>", unsafe_allow_html=True)
-            with muscle_input:
-                m = st.number_input("筋肉量 (kg)", value=latest_measurement("muscle", 50.0), step=0.05, format="%.2f", label_visibility="collapsed", key=f"muscle_{latest_record_key}")
+        muscle_label, muscle_input = st.columns([1, 2])
+        with muscle_label:
+            st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>筋肉量 (kg)</div>", unsafe_allow_html=True)
+        with muscle_input:
+            m = st.number_input("筋肉量 (kg)", value=latest_measurement("muscle", 50.0), step=0.05, format="%.2f", label_visibility="collapsed", key=f"muscle_{latest_record_key}")
 
-            water_label, water_input = st.columns([1, 2])
-            with water_label:
-                st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>体内水分率 (%)</div>", unsafe_allow_html=True)
-            with water_input:
-                wat = st.number_input("体内水分率 (%)", value=latest_measurement("water", 55.0), step=0.05, format="%.2f", label_visibility="collapsed", key=f"water_{latest_record_key}")
-            
-            if st.form_submit_button("保存"):
-                new_data = {"date": str(d), "weight": w, "bmi": b, "fat_pct": f, "visceral": v, "muscle": m, "water": wat}
-                updated_records = [
-                    record
-                    for record in user_info["data"]
-                    if record["date"] != str(d)
-                ] + [new_data]
-                updated_records.sort(key=lambda record: record["date"], reverse=True)
-                try:
-                    save_persistent_records(user_info["username"], updated_records)
-                except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
-                    st.error(f"健康記録を永続保存できません: {exc}")
-                    st.stop()
-                user_info["data"] = updated_records
-                st.session_state.user = user_info
-                
-                st.query_params["health_data"] = encode_data(
-                    build_save_payload(user_info)
-                )
-                st.rerun()
+        water_label, water_input = st.columns([1, 2])
+        with water_label:
+            st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>体内水分率 (%)</div>", unsafe_allow_html=True)
+        with water_input:
+            wat = st.number_input("体内水分率 (%)", value=latest_measurement("water", 55.0), step=0.05, format="%.2f", label_visibility="collapsed", key=f"water_{latest_record_key}")
 
+        note_label, note_input = st.columns([1, 2])
+        with note_label:
+            st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>メモ</div>", unsafe_allow_html=True)
+        with note_input:
+            n = st.text_area("メモ", value=latest_measurement("notes", ""), placeholder="今日の体調やメモを自由に入力できます", label_visibility="collapsed", key=f"notes_{latest_record_key}")
+    
     with col2:
-        st.subheader("履歴データ")
-        backup_header = f"#BACKUP:{encode_data(build_save_payload(user_info))}\n"
-        backup_csv = backup_header + pd.DataFrame(user_info["data"]).to_csv(index=False)
-
-        st.download_button(
-            label="📥 バックアップファイル(CSV)を保存する",
-            data=backup_csv.encode("utf-8-sig"),
-            file_name=f"health_data_backup_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv",
-            key="backup_download_btn",
-            use_container_width=True,
+        history_heading_col, save_col, upload_col = st.columns(
+            [1.3, 1, 1],
+            gap="small",
+            vertical_alignment="center",
         )
+        with history_heading_col:
+            with st.container(key="history_heading"):
+                st.subheader("履歴データ")
+        with save_col:
+            save_clicked = st.button(
+                "保存",
+                key="save_daily_record",
+                use_container_width=True,
+            )
+        with upload_col:
+            read_clicked = st.button(
+                "読み込み",
+                key="show_history_backup_uploader",
+                use_container_width=True,
+            )
+            if read_clicked:
+                st.session_state.show_history_backup_uploader = True
+                st.session_state.history_backup_upload_version = (
+                    st.session_state.get("history_backup_upload_version", 0) + 1
+                )
+                st.session_state.pop("history_backup_signature", None)
 
-        uploaded_backup = st.file_uploader(
-            "過去データを読み込む",
-            type=["csv"],
-            key="history_backup_uploader",
-            label_visibility="collapsed",
-        )
+        uploaded_backup = None
+        if st.session_state.get("show_history_backup_uploader", False):
+            upload_version = st.session_state.get("history_backup_upload_version", 0)
+            with st.container(key="history_backup_uploader"):
+                uploaded_backup = st.file_uploader(
+                    "CSVファイルを選択",
+                    type=["csv"],
+                    key=f"history_backup_file_{upload_version}",
+                    label_visibility="collapsed",
+                )
+
+        if save_clicked:
+            new_data = {
+                "date": str(d),
+                "weight": w,
+                "bmi": b,
+                "fat_pct": f,
+                "visceral": v,
+                "muscle": m,
+                "water": wat,
+                "notes": n,
+            }
+            updated_records = [
+                record
+                for record in user_info["data"]
+                if record["date"] != str(d)
+            ] + [new_data]
+            updated_records.sort(key=lambda record: record["date"], reverse=True)
+            try:
+                save_persistent_records(user_info["username"], updated_records)
+            except (APIError, SupabaseException, httpx.HTTPError) as exc:
+                st.error(f"Supabaseへ健康記録を保存できません: {exc}")
+                st.stop()
+            except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+                st.error(f"健康記録を永続保存できません: {exc}")
+                st.stop()
+            user_info["data"] = updated_records
+            st.session_state.user = user_info
+            st.query_params["health_data"] = encode_data(
+                build_save_payload(user_info)
+            )
+            st.rerun()
 
         if uploaded_backup is None:
             st.session_state.pop("history_backup_signature", None)
@@ -856,10 +825,17 @@ else:
                     save_persistent_records(user_info["username"], restored_records)
                     user_info["data"] = restored_records
                     st.session_state.user = user_info
+                    st.session_state.show_history_backup_uploader = False
+                    st.session_state.history_backup_upload_version = (
+                        st.session_state.get("history_backup_upload_version", 0) + 1
+                    )
+                    st.session_state.pop("history_backup_signature", None)
                     st.query_params["health_data"] = encode_data(
                         build_save_payload(user_info)
                     )
                     st.rerun()
+                except (APIError, SupabaseException, httpx.HTTPError) as exc:
+                    st.error(f"Supabaseへバックアップを保存できません: {exc}")
                 except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
                     st.error(f"バックアップを読み込めません: {exc}")
 
@@ -867,23 +843,26 @@ else:
             history_df = pd.DataFrame(user_info["data"])
             history_df = history_df.sort_values("date", ascending=False).reset_index(drop=True)
 
-            display_cols = ["date", "weight", "bmi", "fat_pct", "visceral", "muscle", "water"]
-            existing_cols = [c for c in display_cols if c in history_df.columns]
-            display_df = history_df[existing_cols].copy()
+            display_cols = ["date", "weight", "bmi", "fat_pct", "visceral", "muscle", "water", "notes"]
+            for column in display_cols:
+                if column not in history_df.columns:
+                    history_df[column] = "" if column == "notes" else None
+            display_df = history_df[display_cols].copy()
             
             display_df = display_df.rename(columns={
                 "date": "日付", "weight": "体重(kg)", "bmi": "BMI", 
                 "fat_pct": "体脂肪率(%)", "visceral": "内臓脂肪", 
-                "muscle": "筋肉量(kg)", "water": "体内水分率(%)"
+                "muscle": "筋肉量(kg)", "water": "体内水分率(%)",
+                "notes": "メモ",
             })
 
             display_df = display_df.reindex(columns=[
                 "日付", "体重(kg)", "BMI", "体脂肪率(%)",
-                "内臓脂肪", "筋肉量(kg)", "体内水分率(%)",
+                "内臓脂肪", "筋肉量(kg)", "体内水分率(%)", "メモ",
             ])
             display_df["日付"] = pd.to_datetime(display_df["日付"], errors="coerce").dt.date
             for col in display_df.columns:
-                if col != "日付":
+                if col not in ("日付", "メモ"):
                     display_df[col] = pd.to_numeric(display_df[col], errors="coerce")
             
             st.dataframe(
@@ -899,6 +878,7 @@ else:
                     "内臓脂肪": st.column_config.NumberColumn("内臓脂肪", width=85, format="%.1f"),
                     "筋肉量(kg)": st.column_config.NumberColumn("筋肉量(kg)", width=95, format="%.1f"),
                     "体内水分率(%)": st.column_config.NumberColumn("体内水分率(%)", width=110, format="%.1f"),
+                    "メモ": st.column_config.TextColumn("メモ", width=250),
                 },
             )
         else:
