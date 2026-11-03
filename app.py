@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 import json
 import base64
 import binascii
+import html
 import hashlib
 import hmac
 import math
@@ -370,14 +371,54 @@ def numeric_series(frame, column):
 # 2. メインアプリケーション設定
 # ==========================================
 
-st.set_page_config(page_title="BodyMetrics - 統合健康管理システム", layout="wide")
+st.set_page_config(page_title="BodyMetrics", layout="wide")
 try:
     initialize_password_store()
 except (OSError, sqlite3.Error) as exc:
     st.error(f"パスワード保存領域を初期化できません: {exc}")
     st.stop()
 
-st.title("📊 BodyMetrics ／ 統合健康管理システム")
+if "user" not in st.session_state:
+    st.session_state.user = {}
+
+if not st.session_state.user:
+    encoded_data = st.query_params.get("health_data")
+    if encoded_data:
+        try:
+            restored_payload = decode_data(encoded_data)
+            if "user_db" not in restored_payload or "records" not in restored_payload:
+                raise ValueError("ログイン情報の形式が正しくありません。")
+
+            restored_user_db = normalize_user_db(restored_payload["user_db"])
+            if len(restored_user_db) != 1:
+                raise ValueError("URLからログインするユーザーを特定できません。")
+
+            restored_username = next(iter(restored_user_db))
+            if not restored_username:
+                raise ValueError("ユーザー名がありません。")
+
+            restored_account = restored_user_db[restored_username]
+            persistent_password = load_persistent_password(restored_username)
+            password_fields = (
+                "password_salt",
+                "password_hash",
+                "password_iterations",
+            )
+            if persistent_password is None or any(
+                restored_account.get(key) != persistent_password[key]
+                for key in password_fields
+            ):
+                raise ValueError("ログイン情報が最新ではありません。再度サインインしてください。")
+
+            st.session_state.user = {
+                "username": restored_username,
+                "data": normalize_records(restored_payload["records"]),
+                "user_db": restored_user_db,
+            }
+        except sqlite3.Error as exc:
+            st.error(f"保存済みパスワードを確認できません: {exc}")
+        except (TypeError, ValueError) as exc:
+            st.error(f"URLのログイン情報を復元できません: {exc}")
 
 # トラブルの原因だった位置固定用のCSSを廃止し、文字サイズと余白の調整のみに限定
 st.markdown("""
@@ -474,16 +515,57 @@ st.markdown("""
         line-height: 1.2 !important;
         white-space: nowrap !important;
     }
+
+    .user-header-name {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        min-height: 3.3rem;
+        font-size: 1.05rem;
+        font-weight: 700;
+        white-space: nowrap;
+    }
+
+    .st-key-logout_button {
+        padding-top: 0.35rem;
+    }
+
+    .st-key-logout_button button {
+        min-height: 44px;
+    }
     </style>
 """, unsafe_allow_html=True)
 
 # 新規サインイン用の初期データ。共有された最新JSONのrecordsをここに設定します。
 initial_records = []
 
-if "user" not in st.session_state:
-    st.session_state.user = {}
-
 is_logged_in = "username" in st.session_state.user
+
+if is_logged_in:
+    title_col, header_user_col = st.columns([4, 2])
+    with title_col:
+        st.title("📊 BodyMetrics")
+    with header_user_col:
+        name_col, logout_col = st.columns([1.6, 1])
+        with name_col:
+            st.markdown(
+                '<div class="user-header-name">👤 '
+                f'{html.escape(st.session_state.user["username"])}</div>',
+                unsafe_allow_html=True,
+            )
+        with logout_col:
+            logout_clicked = st.button(
+                "ログアウト",
+                key="logout_button",
+                use_container_width=True,
+            )
+    if logout_clicked:
+        st.session_state.user = {}
+        if "health_data" in st.query_params:
+            del st.query_params["health_data"]
+        st.rerun()
+else:
+    st.title("📊 BodyMetrics")
 
 if not is_logged_in:
     def sign_in(username, password):
@@ -605,7 +687,6 @@ else:
     except (TypeError, ValueError) as exc:
         st.error(f"保存データに不整合があります: {exc}")
         st.stop()
-    st.sidebar.title(f"👤 {user_info['username']}")
     latest_record = max(
         user_info["data"],
         key=lambda record: record["date"],
@@ -633,7 +714,7 @@ else:
         value = latest_record.get(column)
         return default if value is None else value
 
-    with st.sidebar.form("password_change_form"):
+    with st.sidebar.form("password_change_form", clear_on_submit=True):
         new_password = st.text_input(
             "新しいパスワード",
             type="password",
@@ -664,11 +745,11 @@ else:
                     st.query_params["health_data"] = encode_data(
                         build_save_payload(user_info)
                     )
-                    st.sidebar.success("パスワードを更新しました。")
-    
-    if st.sidebar.button("サインアウト"):
-        st.session_state.user = {}
-        st.rerun()
+                    st.session_state.password_change_success = True
+                    st.rerun()
+
+    if st.session_state.pop("password_change_success", False):
+        st.sidebar.success("パスワードを更新しました。")
 
     # 【確実なレイアウト修正】「本日の記録」側を細め（2）に固定し、「履歴データ」側を広め（3）に指定
     col1, col2 = st.columns([1.8, 3.2])
