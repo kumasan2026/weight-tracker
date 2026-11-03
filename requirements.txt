@@ -5,3 +5,4 @@ plotly
 httpx
 python-dotenv
 postgrest
+supabase
