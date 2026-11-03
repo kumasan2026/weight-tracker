@@ -4,3 +4,4 @@ matplotlib
 plotly
 httpx
 python-dotenv
+postgrest
