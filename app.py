@@ -120,16 +120,20 @@ def load_persistent_records(username):
 
 def save_persistent_records(username, records):
     normalized_records = normalize_records(records)
-    records_json = json.dumps(
+    json.dumps(
         normalized_records,
         ensure_ascii=False,
         allow_nan=False,
     )
     supabase.table("health_records").upsert({
         "username": username,
-        "records_json": records_json,
+        "records_json": normalized_records,
         "updated_at": datetime.now().astimezone().isoformat()
     }).execute()
+    persisted_records = load_persistent_records(username)
+    if persisted_records != normalized_records:
+        raise ValueError("Supabaseに保存した健康記録を読み戻して確認できませんでした。")
+    return persisted_records
 
 
 
@@ -218,7 +222,9 @@ def build_backup_csv(records):
             lineterminator="\n",
         )
     else:
-        csv_buffer.write("date,weight,bmi,fat_pct,visceral,muscle,water,notes\n")
+        csv_buffer.write(
+            "date,weight,bmi,body_fat,fat_pct,visceral,muscle_mass,muscle,water,notes\n"
+        )
     return csv_buffer.getvalue().encode("utf-8-sig")
 
 
@@ -235,6 +241,18 @@ def normalize_records(records):
         if normalized_record.get("fat_pct") is None and normalized_record.get("fat") is not None:
             normalized_record["fat_pct"] = normalized_record["fat"]
         normalized_record.pop("fat", None)
+        normalized_record["body_fat"] = (
+            normalized_record.get("body_fat")
+            if normalized_record.get("body_fat") is not None
+            else normalized_record.get("fat_pct")
+        )
+        normalized_record["fat_pct"] = normalized_record["body_fat"]
+        normalized_record["muscle_mass"] = (
+            normalized_record.get("muscle_mass")
+            if normalized_record.get("muscle_mass") is not None
+            else normalized_record.get("muscle")
+        )
+        normalized_record["muscle"] = normalized_record["muscle_mass"]
 
         if not normalized_record.get("date"):
             raise ValueError(f"{index + 1}件目の記録に日付がありません。")
@@ -246,7 +264,16 @@ def normalize_records(records):
             raise ValueError(f"{index + 1}件目の日付が正しくありません。")
         normalized_record["date"] = parsed_date.date().isoformat()
 
-        for column in ("weight", "bmi", "fat_pct", "visceral", "muscle", "water"):
+        for column in (
+            "weight",
+            "bmi",
+            "body_fat",
+            "fat_pct",
+            "visceral",
+            "muscle_mass",
+            "muscle",
+            "water",
+        ):
             if column not in normalized_record:
                 continue
             value = normalized_record[column]
@@ -747,7 +774,7 @@ else:
             )
         with export_col:
             st.download_button(
-                "CSVダウンロード",
+        "CSVダウンロード",
                 data=build_backup_csv(user_info["data"]),
                 file_name=f"bodymetrics_backup_{datetime.now().strftime('%Y%m%d')}.csv",
                 mime="text/csv",
@@ -757,15 +784,12 @@ else:
         with upload_col:
             read_clicked = st.button(
                 "読み込み",
-                key="show_history_backup_uploader",
+                key="btn_trigger_history_backup",
                 use_container_width=True,
                 disabled=not supabase_available,
             )
             if read_clicked:
                 st.session_state.show_history_backup_uploader = True
-                st.session_state.history_backup_upload_version = (
-                    st.session_state.get("history_backup_upload_version", 0) + 1
-                )
                 st.session_state.pop("history_backup_signature", None)
 
         uploaded_backup = None
@@ -773,43 +797,55 @@ else:
             supabase_available
             and st.session_state.get("show_history_backup_uploader", False)
         ):
-            upload_version = st.session_state.get("history_backup_upload_version", 0)
             with st.container(key="history_backup_uploader"):
-                uploaded_backup = st.file_uploader(
-                    "CSVファイルを選択",
-                    type=["csv"],
-                    key=f"history_backup_file_{upload_version}",
-                    label_visibility="collapsed",
-                )
+                uploader_col, cancel_col = st.columns([4, 1], vertical_alignment="bottom")
+                with uploader_col:
+                    uploaded_backup = st.file_uploader(
+                        "CSVファイルを選択",
+                        type=["csv"],
+                        key="history_backup_csv_uploader_fixed",
+                        label_visibility="collapsed",
+                    )
+                with cancel_col:
+                    cancel_upload = st.button(
+                        "キャンセル",
+                        key="cancel_history_backup_upload",
+                        use_container_width=True,
+                    )
+                if cancel_upload:
+                    st.session_state.show_history_backup_uploader = False
+                    st.session_state.pop("history_backup_signature", None)
+                    st.rerun()
 
         if save_clicked:
             new_data = {
                 "date": str(d),
                 "weight": w,
                 "bmi": b,
-                "fat_pct": f,
+                "body_fat": f,
                 "visceral": v,
-                "muscle": m,
+                "muscle_mass": m,
                 "water": wat,
                 "notes": n,
             }
-            updated_records = [
-                record
-                for record in user_info["data"]
-                if record["date"] != str(d)
-            ] + [new_data]
-            updated_records.sort(key=lambda record: record["date"], reverse=True)
-            record_saved = False
             try:
-                save_persistent_records(user_info["username"], updated_records)
+                latest_records = load_persistent_records(user_info["username"])
+                updated_records = [
+                    record
+                    for record in latest_records
+                    if record["date"] != str(d)
+                ] + [new_data]
+                updated_records.sort(key=lambda record: record["date"], reverse=True)
+                persisted_records = save_persistent_records(
+                    user_info["username"],
+                    updated_records,
+                )
             except (APIError, SupabaseException, httpx.HTTPError) as exc:
-                st.error(f"Supabaseへ健康記録を保存できません: {exc}")
+                st.error(f"健康記録の保存またはSupabaseからの再読込に失敗しました: {exc}")
             except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
-                st.error(f"健康記録を永続保存できません: {exc}")
+                st.error(f"健康記録を保存・確認できません: {exc}")
             else:
-                record_saved = True
-            if record_saved:
-                user_info["data"] = updated_records
+                user_info["data"] = persisted_records
                 st.session_state.user = user_info
                 st.rerun()
 
@@ -825,13 +861,13 @@ else:
                     if restored is None or "records" not in restored:
                         raise ValueError("CSVに有効な #BACKUP データがありません。")
                     restored_records = normalize_records(restored["records"])
-                    save_persistent_records(user_info["username"], restored_records)
-                    user_info["data"] = restored_records
+                    persisted_records = save_persistent_records(
+                        user_info["username"],
+                        restored_records,
+                    )
+                    user_info["data"] = persisted_records
                     st.session_state.user = user_info
                     st.session_state.show_history_backup_uploader = False
-                    st.session_state.history_backup_upload_version = (
-                        st.session_state.get("history_backup_upload_version", 0) + 1
-                    )
                     st.session_state.pop("history_backup_signature", None)
                     st.rerun()
                 except (APIError, SupabaseException, httpx.HTTPError) as exc:
