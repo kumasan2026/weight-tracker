@@ -65,7 +65,9 @@ class SupabaseConflictError(SupabaseError):
 def get_supabase_config():
     try:
         secrets_config = st.secrets
-        supabase_secrets = secrets_config.get("supabase", {})
+        # supabaseグループがあっても無くても、全体から探せるように修正
+        supabase_secrets = secrets_config.get("supabase") if secrets_config.get("supabase") else secrets_config
+
     except StreamlitSecretNotFoundError:
         secrets_config = {}
         supabase_secrets = {}
