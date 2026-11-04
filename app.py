@@ -974,4 +974,3 @@ else:
         )
         fig2.update_xaxes(tickformat="%m月%d日")
         st.plotly_chart(fig2, width="stretch")
-```
