@@ -4,3 +4,4 @@ plotly
 httpx
 psycopg[binary]
 supabase
+python-dotenv
