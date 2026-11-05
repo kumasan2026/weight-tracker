@@ -480,11 +480,6 @@ st.markdown("""
         font-size: 1.25rem !important;
     }
 
-    /* CSV読み込み上限の補助表示だけを隠す */
-    .st-key-history_backup_uploader [data-testid="stFileUploaderDropzone"] small {
-        display: none !important;
-    }
-
     .user-header-name {
         display: flex;
         align-items: center;
@@ -864,10 +859,10 @@ else:
                 uploader_col, cancel_col = st.columns([4, 1], vertical_alignment="bottom")
                 with uploader_col:
                     uploaded_backup = st.file_uploader(
-                        "CSVファイルを選択",
+                        "CSVファイルを選択（取込み）",
                         type=["csv"],
                         key="history_backup_csv_uploader_fixed",
-                        label_visibility="collapsed",
+                        label_visibility="visible",
                     )
                 with cancel_col:
                     cancel_upload = st.button(
