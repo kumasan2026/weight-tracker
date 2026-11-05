@@ -10,7 +10,7 @@ import re
 import secrets
 import sqlite3
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 from urllib.parse import urlparse
@@ -130,10 +130,8 @@ def save_persistent_records(username, records):
         "records_json": normalized_records,
         "updated_at": datetime.now().astimezone().isoformat()
     }).execute()
-    persisted_records = load_persistent_records(username)
-    if persisted_records != normalized_records:
-        raise ValueError("Supabaseに保存した健康記録を読み戻して確認できませんでした。")
-    return persisted_records
+
+    return normalized_records
 
 
 
@@ -681,29 +679,6 @@ else:
         key=lambda record: record["date"],
         default={},
     )
-    latest_record_key = hashlib.sha256(
-        json.dumps(
-            [
-                latest_record.get(column)
-                for column in (
-                    "date",
-                    "weight",
-                    "bmi",
-                    "fat_pct",
-                    "visceral",
-                    "muscle",
-                    "water",
-                    "notes",
-                )
-            ],
-            allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()[:12]
-
-    def latest_measurement(column, default):
-        value = latest_record.get(column)
-        return default if value is None else value
-
     col1, col2 = st.columns([1.8, 3.2])
     
     with col1:
@@ -712,49 +687,137 @@ else:
         with date_label:
             st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>日付</div>", unsafe_allow_html=True)
         with date_input:
-            d = st.date_input("日付", datetime.today(), label_visibility="collapsed")
+            jst = timezone(timedelta(hours=9))
+            d = st.date_input(
+                "日付",
+                datetime.now(jst).date(),
+                label_visibility="collapsed",
+            )
+
+        selected_record = next(
+            (
+                record
+                for record in user_info["data"]
+                if record["date"] == d.isoformat()
+            ),
+            None,
+        )
+        form_record = selected_record if selected_record is not None else latest_record
+        latest_record_key = hashlib.sha256(
+            json.dumps(
+                [
+                    d.isoformat(),
+                    *(
+                        form_record.get(column)
+                        for column in (
+                            "date",
+                            "weight",
+                            "bmi",
+                            "fat_pct",
+                            "visceral",
+                            "muscle",
+                            "water",
+                            "notes",
+                        )
+                    ),
+                ],
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()[:12]
+
+        def form_measurement(column, default):
+            value = form_record.get(column)
+            return default if value is None else value
 
         weight_label, weight_input = st.columns([1, 2])
         with weight_label:
             st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>体重 (kg)</div>", unsafe_allow_html=True)
         with weight_input:
-            w = st.number_input("体重 (kg)", value=latest_measurement("weight", 70.0), step=0.05, format="%.2f", label_visibility="collapsed", key=f"weight_{latest_record_key}")
+            w = st.number_input(
+                "体重 (kg)",
+                value=form_measurement("weight", 70.0),
+                step=0.05,
+                format="%.2f",
+                label_visibility="collapsed",
+                key=f"weight_{latest_record_key}",
+            )
 
         bmi_label, bmi_input = st.columns([1, 2])
         with bmi_label:
             st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>BMI</div>", unsafe_allow_html=True)
         with bmi_input:
-            b = st.number_input("BMI", value=latest_measurement("bmi", 22.0), step=0.05, format="%.2f", label_visibility="collapsed", key=f"bmi_{latest_record_key}")
+            b = st.number_input(
+                "BMI",
+                value=form_measurement("bmi", 22.0),
+                step=0.05,
+                format="%.2f",
+                label_visibility="collapsed",
+                key=f"bmi_{latest_record_key}",
+            )
 
         fat_label, fat_input = st.columns([1, 2])
         with fat_label:
             st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>体脂肪率 (%)</div>", unsafe_allow_html=True)
         with fat_input:
-            f = st.number_input("体脂肪率 (%)", value=latest_measurement("fat_pct", 20.0), step=0.05, format="%.2f", label_visibility="collapsed", key=f"fat_{latest_record_key}")
+            f = st.number_input(
+                "体脂肪率 (%)",
+                value=form_measurement("fat_pct", 20.0),
+                step=0.05,
+                format="%.2f",
+                label_visibility="collapsed",
+                key=f"fat_{latest_record_key}",
+            )
 
         visceral_label, visceral_input = st.columns([1, 2])
         with visceral_label:
             st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>内臓脂肪レベル</div>", unsafe_allow_html=True)
         with visceral_input:
-            v = st.number_input("内臓脂肪レベル", value=latest_measurement("visceral", 5.0), step=0.05, format="%.2f", label_visibility="collapsed", key=f"visceral_{latest_record_key}")
+            v = st.number_input(
+                "内臓脂肪レベル",
+                value=form_measurement("visceral", 5.0),
+                step=0.05,
+                format="%.2f",
+                label_visibility="collapsed",
+                key=f"visceral_{latest_record_key}",
+            )
 
         muscle_label, muscle_input = st.columns([1, 2])
         with muscle_label:
             st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>筋肉量 (kg)</div>", unsafe_allow_html=True)
         with muscle_input:
-            m = st.number_input("筋肉量 (kg)", value=latest_measurement("muscle", 50.0), step=0.05, format="%.2f", label_visibility="collapsed", key=f"muscle_{latest_record_key}")
+            m = st.number_input(
+                "筋肉量 (kg)",
+                value=form_measurement("muscle", 50.0),
+                step=0.05,
+                format="%.2f",
+                label_visibility="collapsed",
+                key=f"muscle_{latest_record_key}",
+            )
 
         water_label, water_input = st.columns([1, 2])
         with water_label:
             st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>体内水分率 (%)</div>", unsafe_allow_html=True)
         with water_input:
-            wat = st.number_input("体内水分率 (%)", value=latest_measurement("water", 55.0), step=0.05, format="%.2f", label_visibility="collapsed", key=f"water_{latest_record_key}")
+            wat = st.number_input(
+                "体内水分率 (%)",
+                value=form_measurement("water", 55.0),
+                step=0.05,
+                format="%.2f",
+                label_visibility="collapsed",
+                key=f"water_{latest_record_key}",
+            )
 
         note_label, note_input = st.columns([1, 2])
         with note_label:
             st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>メモ</div>", unsafe_allow_html=True)
         with note_input:
-            n = st.text_area("メモ", value=latest_measurement("notes", ""), placeholder="今日の体調やメモを自由に入力できます", label_visibility="collapsed", key=f"notes_{latest_record_key}")
+            n = st.text_area(
+                "メモ",
+                value=form_measurement("notes", ""),
+                placeholder="今日の体調やメモを自由に入力できます",
+                label_visibility="collapsed",
+                key=f"notes_{latest_record_key}",
+            )
     
     with col2:
         history_heading_col, save_col, export_col, upload_col = st.columns(
