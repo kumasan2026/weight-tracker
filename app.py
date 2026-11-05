@@ -486,10 +486,17 @@ st.markdown("""
     [data-testid="stTable"] *, [data-testid="stDataFrame"] * {
         font-size: 1.25rem !important;
         color: #000000 !important;
+        font-weight: 600 !important;
     }
 
-    /* CSV読み込み上限の補助表示だけを隠す */
-    [data-testid="stFileUploader"] [data-testid="stFileUploaderDropzone"] small {
+    [data-testid="stFileUploaderDropzone"] {
+        background-color: transparent !important;
+        border: none !important;
+    }
+
+    /* CSVアップロードの不要な補助テキストを隠す */
+    [data-testid="stFileUploaderDropzone"] small,
+    [data-testid="stFileUploaderDropzone"] [data-testid="stFileUploaderDropzoneInstructions"] {
         display: none !important;
     }
 
@@ -1026,7 +1033,12 @@ else:
             template="plotly_white",
             font=dict(color="#000000", size=14),
             hovermode="closest",
-            hoverlabel=dict(font_size=16, font_family="Yu Gothic, Meiryo, sans-serif"),
+            hoverlabel=dict(
+                bgcolor="#ffffff",
+                font_size=16,
+                font_color="#000000",
+                font_family="Yu Gothic, Meiryo, sans-serif",
+            ),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
             margin=dict(l=30, r=20, t=90, b=20),
             height=420,
@@ -1065,7 +1077,12 @@ else:
             template="plotly_white",
             font=dict(color="#000000", size=14),
             hovermode="closest",
-            hoverlabel=dict(font_size=16, font_family="Yu Gothic, Meiryo, sans-serif"),
+            hoverlabel=dict(
+                bgcolor="#ffffff",
+                font_size=16,
+                font_color="#000000",
+                font_family="Yu Gothic, Meiryo, sans-serif",
+            ),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
             margin=dict(l=30, r=20, t=90, b=20),
             height=420,
