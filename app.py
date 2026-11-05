@@ -32,6 +32,11 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
 PASSWORD_HASH_ITERATIONS = 310_000
 
+
+class PersistenceError(Exception):
+    pass
+
+
 def encode_data(data_dict):
     json_str = json.dumps(data_dict, ensure_ascii=False, allow_nan=False)
     return base64.b64encode(json_str.encode("utf-8")).decode("ascii")
@@ -125,15 +130,27 @@ def save_persistent_records(username, records):
         ensure_ascii=False,
         allow_nan=False,
     )
-    supabase.table("health_records").upsert({
-        "username": username,
-        "records_json": normalized_records,
-        "updated_at": datetime.now().astimezone().isoformat()
-    }).execute()
+    response = (
+        supabase.table("health_records")
+        .upsert({
+            "username": username,
+            "records_json": normalized_records,
+            "updated_at": datetime.now().astimezone().isoformat(),
+        })
+        .select("records_json")
+        .execute()
+    )
+    if not response.data:
+        raise PersistenceError("Supabaseから保存結果が返されませんでした。")
 
-    return normalized_records
+    stored_records = response.data[0]["records_json"]
+    if isinstance(stored_records, str):
+        stored_records = json.loads(stored_records)
+    persisted_records = normalize_records(stored_records)
+    if persisted_records != normalized_records:
+        raise PersistenceError("Supabaseへの保存結果が送信データと一致しません。")
 
-
+    return persisted_records
 
 
 def verify_login(username, password, user_db):
@@ -863,7 +880,7 @@ else:
         uploader_version = st.session_state.get("history_backup_uploader_version", 0)
         with upload_col:
             uploaded_backup = st.file_uploader(
-                "読み込み",
+                "取込み",
                 type=["csv"],
                 key=f"history_backup_csv_uploader_{uploader_version}",
                 label_visibility="collapsed",
@@ -894,7 +911,12 @@ else:
                     )
                     st.session_state.pop("history_backup_signature", None)
                     st.rerun()
-                except (APIError, SupabaseException, httpx.HTTPError) as exc:
+                except (
+                    APIError,
+                    PersistenceError,
+                    SupabaseException,
+                    httpx.HTTPError,
+                ) as exc:
                     st.session_state.pop("history_backup_signature", None)
                     st.error(f"Supabaseへバックアップを保存できません: {exc}")
                 except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
@@ -924,13 +946,18 @@ else:
                     user_info["username"],
                     updated_records,
                 )
-            except (APIError, SupabaseException, httpx.HTTPError) as exc:
+            except (
+                APIError,
+                PersistenceError,
+                SupabaseException,
+                httpx.HTTPError,
+            ) as exc:
                 st.error(f"健康記録の保存またはSupabaseからの再読込に失敗しました: {exc}")
             except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
                 st.error(f"健康記録を保存・確認できません: {exc}")
             else:
+                st.session_state.user["data"] = persisted_records
                 user_info["data"] = persisted_records
-                st.session_state.user = user_info
                 st.rerun()
 
         if user_info["data"]:
