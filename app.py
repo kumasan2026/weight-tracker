@@ -32,11 +32,6 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
 PASSWORD_HASH_ITERATIONS = 310_000
 
-
-class PersistenceError(Exception):
-    pass
-
-
 def encode_data(data_dict):
     json_str = json.dumps(data_dict, ensure_ascii=False, allow_nan=False)
     return base64.b64encode(json_str.encode("utf-8")).decode("ascii")
@@ -130,31 +125,15 @@ def save_persistent_records(username, records):
         ensure_ascii=False,
         allow_nan=False,
     )
-    try:
-        response = (
-            supabase.table("health_records")
-            .upsert({
-                "username": username,
-                "records_json": normalized_records,
-                "updated_at": datetime.now().astimezone().isoformat(),
-            })
-            .select("records_json")
-            .execute()
-        )
-    except (APIError, SupabaseException, httpx.HTTPError) as exc:
-        print(f"health_records upsert failed ({type(exc).__name__}): {exc}", flush=True)
-        raise
-    if not response.data:
-        raise PersistenceError("Supabaseから保存結果が返されませんでした。")
+    supabase.table("health_records").upsert({
+        "username": username,
+        "records_json": normalized_records,
+        "updated_at": datetime.now().astimezone().isoformat()
+    }).execute()
 
-    stored_records = response.data[0]["records_json"]
-    if isinstance(stored_records, str):
-        stored_records = json.loads(stored_records)
-    persisted_records = normalize_records(stored_records)
-    if persisted_records != normalized_records:
-        raise PersistenceError("Supabaseへの保存結果が送信データと一致しません。")
+    return normalized_records
 
-    return persisted_records
+
 
 
 def verify_login(username, password, user_db):
@@ -422,22 +401,20 @@ supabase_available = supabase is not None
 if "user" not in st.session_state:
     st.session_state.user = {}
 
-# アプリ全体の文字と入力項目の視認性を統一
+# トラブルの原因だった位置固定用のCSSを廃止し、文字サイズと余白の調整のみに限定
 st.markdown("""
     <style>
-    html, body, [data-testid="stMarkdownContainer"] p,
-    [data-testid="stMarkdownContainer"] li,
-    [data-testid="stWidgetLabel"] p,
-    [data-testid="stTable"], [data-testid="stDataFrame"] {
-        color: #000000 !important;
+    /* アプリ全体の基本文字 */
+    html, body, [data-testid="stMarkdownContainer"] p {
         font-size: 1.15rem !important;
         line-height: 1.6 !important;
     }
-
+    
+    /* 見出し（本日の記録、履歴データなど） */
     h2, h3, .stSubheader {
         font-size: 1.65rem !important;
-        font-weight: 800 !important;
-        color: #000000 !important;
+        font-weight: bold !important;
+        color: #111111 !important;
         margin-bottom: 15px !important;
         white-space: nowrap !important;
         word-break: keep-all !important;
@@ -447,28 +424,23 @@ st.markdown("""
         white-space: nowrap !important;
         word-break: keep-all !important;
         font-size: clamp(1.7rem, 2.4vw, 2.5rem) !important;
-        color: #000000 !important;
     }
-
-    .stNumberInput label, .stDateInput label, .stTextInput label,
-    .stTextArea label, .stSelectbox label, .stFileUploader label {
+    
+    /* 入力項目のラベル文字 */
+    .stNumberInput label, .stDateInput label, .stTextInput label {
         font-size: 1.15rem !important;
-        font-weight: 800 !important;
-        color: #000000 !important;
+        font-weight: 700 !important;
+        color: #222222 !important;
     }
-
+    
+    /* 入力枠内の数値・文字の大きさ */
     .stNumberInput input, .stDateInput input, .stTextInput input {
         font-size: 1.15rem !important;
         height: 48px !important;
         font-weight: bold !important;
-        color: #000000 !important;
     }
-
-    .stTextArea textarea, .stSelectbox [data-baseweb="select"] *,
-    [data-testid="stFileUploader"] * {
-        color: #000000 !important;
-    }
-
+    
+    /* バックアップ保存ボタンの調整 */
     .stButton button, .stDownloadButton button {
         font-size: 1.1rem !important;
         font-weight: bold !important;
@@ -487,10 +459,10 @@ st.markdown("""
         font-size: 1.15rem !important;
         white-space: nowrap !important;
         word-break: keep-all !important;
-        color: #000000 !important;
     }
 
     .st-key-save_daily_record,
+    .st-key-history_backup_uploader,
     .st-key-history_heading {
         min-width: 0 !important;
     }
@@ -503,35 +475,13 @@ st.markdown("""
         border: 2px solid #dbdbdb !important;
     }
     
-    /* 履歴データのテーブル内の文字 */
+    /* 履歴データのテーブル内の文字サイズ */
     [data-testid="stTable"] *, [data-testid="stDataFrame"] * {
         font-size: 1.25rem !important;
-        color: #000000 !important;
-        font-weight: 600 !important;
     }
 
-    [data-testid="stFileUploaderDropzone"] {
-        background-color: transparent !important;
-        border: none !important;
-    }
-
-    [data-testid="stFileUploaderDropzone"] button > span {
-        display: none !important;
-    }
-
-    [data-testid="stFileUploaderDropzone"] button {
-        font-size: 0 !important;
-        color: transparent !important;
-    }
-
-    [data-testid="stFileUploaderDropzone"] button::after {
-        content: "取込み";
-        font-size: 0.9rem !important;
-    }
-
-    /* アップローダーの標準指示とボタン文字を隠す */
-    [data-testid="stFileUploaderDropzone"] [data-testid="stFileUploaderDropzoneInstructions"],
-    [data-testid="stFileUploaderDropzone"] small {
+    /* CSV読み込み上限の補助表示だけを隠す */
+    .st-key-history_backup_uploader [data-testid="stFileUploaderDropzone"] small {
         display: none !important;
     }
 
@@ -542,7 +492,6 @@ st.markdown("""
         min-height: 3.3rem;
         font-size: 1.05rem;
         font-weight: 700;
-        color: #000000;
         white-space: nowrap;
     }
 
@@ -577,6 +526,9 @@ if is_logged_in:
             key="logout_button",
             use_container_width=True,
         )
+    if logout_clicked:
+        st.session_state.user = {}
+        st.rerun()
 else:
     st.title("📊 BodyMetrics")
 
@@ -603,11 +555,22 @@ if not is_logged_in:
             st.error("ユーザー名またはパスワードが正しくありません。")
             return
 
+        try:
+            records = load_persistent_records(username)
+        except ValueError as exc:
+            st.error(f"記録データを読み込めません: {exc}")
+            return
+        except (APIError, SupabaseException, httpx.HTTPError, json.JSONDecodeError) as exc:
+            st.error(f"Supabaseから健康記録を読み込めません: {exc}")
+            return
+        except sqlite3.Error as exc:
+            st.error(f"保存済みの健康記録を読み込めません: {exc}")
+            return
+
         st.session_state.user = {
             "username": username,
-            "data": load_persistent_records(username),
+            "data": records,
             "user_db": {username: account},
-            "record_form_session_id": secrets.token_hex(16),
         }
         st.rerun()
 
@@ -699,24 +662,10 @@ if not is_logged_in:
                         "username": new_username,
                         "data": [],
                         "user_db": {new_username: persisted_password},
-                        "record_form_session_id": secrets.token_hex(16),
                     }
                     st.rerun()
 else:
     user_info = st.session_state.user
-
-    try:
-        user_info["data"] = load_persistent_records(user_info["username"])
-    except ValueError as exc:
-        st.error(f"記録データを読み込めません: {exc}")
-        st.stop()
-    except (APIError, SupabaseException, httpx.HTTPError, json.JSONDecodeError) as exc:
-        st.error(f"Supabaseから健康記録を読み込めません: {exc}")
-        st.stop()
-    except sqlite3.Error as exc:
-        st.error(f"保存済みの健康記録を読み込めません: {exc}")
-        st.stop()
-
     try:
         user_info["data"] = normalize_records(user_info.get("data", []))
         user_info["user_db"] = normalize_user_db(user_info.get("user_db"))
@@ -724,17 +673,12 @@ else:
         st.error(f"保存データに不整合があります: {exc}")
         st.session_state.user = {}
         st.rerun()
-
+        st.rerun()
     latest_record = max(
         user_info["data"],
         key=lambda record: record["date"],
         default={},
     )
-    record_form_session_id = user_info.get("record_form_session_id")
-    if not isinstance(record_form_session_id, str):
-        record_form_session_id = secrets.token_hex(16)
-        user_info["record_form_session_id"] = record_form_session_id
-
     col1, col2 = st.columns([1.8, 3.2])
     
     with col1:
@@ -746,12 +690,7 @@ else:
             jst = timezone(timedelta(hours=9))
             d = st.date_input(
                 "日付",
-                (
-                    datetime.fromisoformat(latest_record["date"]).date()
-                    if latest_record
-                    else datetime.now(jst).date()
-                ),
-                key=f"record_date_{record_form_session_id}",
+                datetime.now(jst).date(),
                 label_visibility="collapsed",
             )
 
@@ -767,7 +706,6 @@ else:
         latest_record_key = hashlib.sha256(
             json.dumps(
                 [
-                    record_form_session_id,
                     d.isoformat(),
                     *(
                         form_record.get(column)
@@ -906,15 +844,73 @@ else:
                 key="download_health_records",
                 use_container_width=True,
             )
-        uploader_version = st.session_state.get("history_backup_uploader_version", 0)
         with upload_col:
-            uploaded_backup = st.file_uploader(
-                "取込み",
-                type=["csv"],
-                key=f"history_backup_csv_uploader_{uploader_version}",
-                label_visibility="collapsed",
+            read_clicked = st.button(
+                "読み込み",
+                key="btn_trigger_history_backup",
+                use_container_width=True,
                 disabled=not supabase_available,
             )
+            if read_clicked:
+                st.session_state.show_history_backup_uploader = True
+                st.session_state.pop("history_backup_signature", None)
+
+        uploaded_backup = None
+        if (
+            supabase_available
+            and st.session_state.get("show_history_backup_uploader", False)
+        ):
+            with st.container(key="history_backup_uploader"):
+                uploader_col, cancel_col = st.columns([4, 1], vertical_alignment="bottom")
+                with uploader_col:
+                    uploaded_backup = st.file_uploader(
+                        "CSVファイルを選択",
+                        type=["csv"],
+                        key="history_backup_csv_uploader_fixed",
+                        label_visibility="collapsed",
+                    )
+                with cancel_col:
+                    cancel_upload = st.button(
+                        "キャンセル",
+                        key="cancel_history_backup_upload",
+                        use_container_width=True,
+                    )
+                if cancel_upload:
+                    st.session_state.show_history_backup_uploader = False
+                    st.session_state.pop("history_backup_signature", None)
+                    st.rerun()
+
+        if save_clicked:
+            new_data = {
+                "date": str(d),
+                "weight": w,
+                "bmi": b,
+                "body_fat": f,
+                "visceral": v,
+                "muscle_mass": m,
+                "water": wat,
+                "notes": n,
+            }
+            try:
+                latest_records = load_persistent_records(user_info["username"])
+                updated_records = [
+                    record
+                    for record in latest_records
+                    if record["date"] != str(d)
+                ] + [new_data]
+                updated_records.sort(key=lambda record: record["date"], reverse=True)
+                persisted_records = save_persistent_records(
+                    user_info["username"],
+                    updated_records,
+                )
+            except (APIError, SupabaseException, httpx.HTTPError) as exc:
+                st.error(f"健康記録の保存またはSupabaseからの再読込に失敗しました: {exc}")
+            except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+                st.error(f"健康記録を保存・確認できません: {exc}")
+            else:
+                user_info["data"] = persisted_records
+                st.session_state.user = user_info
+                st.rerun()
 
         if uploaded_backup is None:
             st.session_state.pop("history_backup_signature", None)
@@ -928,77 +924,19 @@ else:
                     if restored is None or "records" not in restored:
                         raise ValueError("CSVに有効な #BACKUP データがありません。")
                     restored_records = normalize_records(restored["records"])
-                    save_persistent_records(
+                    persisted_records = save_persistent_records(
                         user_info["username"],
                         restored_records,
                     )
-                    st.rerun()
-                except (
-                    APIError,
-                    PersistenceError,
-                    SupabaseException,
-                    httpx.HTTPError,
-                ) as exc:
+                    user_info["data"] = persisted_records
+                    st.session_state.user = user_info
+                    st.session_state.show_history_backup_uploader = False
                     st.session_state.pop("history_backup_signature", None)
+                    st.rerun()
+                except (APIError, SupabaseException, httpx.HTTPError) as exc:
                     st.error(f"Supabaseへバックアップを保存できません: {exc}")
                 except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
-                    st.session_state.pop("history_backup_signature", None)
                     st.error(f"バックアップを読み込めません: {exc}")
-
-        if save_clicked or logout_clicked:
-            new_data = {
-                "date": str(d),
-                "weight": w,
-                "bmi": b,
-                "body_fat": f,
-                "visceral": v,
-                "muscle_mass": m,
-                "water": wat,
-                "notes": n,
-            }
-            form_changed = any(
-                new_data[key] != form_measurement(key, default)
-                for key, default in (
-                    ("weight", 70.0),
-                    ("bmi", 22.0),
-                    ("body_fat", 20.0),
-                    ("visceral", 5.0),
-                    ("muscle_mass", 50.0),
-                    ("water", 55.0),
-                    ("notes", ""),
-                )
-            )
-            try:
-                if save_clicked or form_changed:
-                    latest_records = load_persistent_records(user_info["username"])
-                    updated_records = [
-                        record
-                        for record in latest_records
-                        if record["date"] != str(d)
-                    ] + [new_data]
-                    updated_records.sort(
-                        key=lambda record: record["date"],
-                        reverse=True,
-                    )
-                else:
-                    updated_records = user_info["data"]
-                save_persistent_records(
-                    user_info["username"],
-                    updated_records,
-                )
-            except (
-                APIError,
-                PersistenceError,
-                SupabaseException,
-                httpx.HTTPError,
-            ) as exc:
-                st.error(f"健康記録の保存またはSupabaseからの再読込に失敗しました: {exc}")
-            except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
-                st.error(f"健康記録を保存・確認できません: {exc}")
-            else:
-                if logout_clicked:
-                    st.session_state.clear()
-                st.rerun()
 
         if user_info["data"]:
             history_df = pd.DataFrame(user_info["data"])
@@ -1062,14 +1000,6 @@ else:
                 f"{label}: %{{y:.2f}} {unit}<extra></extra>"
             )
 
-        axis_style = dict(
-            showline=True,
-            linewidth=2,
-            linecolor="#000000",
-            gridcolor="#e0e0e0",
-            tickfont=dict(color="#000000", size=14),
-        )
-
         # 一段目グラフ：体重・筋肉量・体内水分率
         fig1 = go.Figure()
         for name, key, color in [
@@ -1084,8 +1014,8 @@ else:
                     y=y_values,
                     mode="lines+markers",
                     name=name,
-                    line=dict(color=color, width=5),
-                    marker=dict(size=12, color=color),
+                    line=dict(color=color, width=3),
+                    marker=dict(size=10, color=color),
                     hovertemplate=build_hover_template(name, ""),
                 )
             )
@@ -1098,20 +1028,13 @@ else:
             xaxis_title="日付",
             yaxis_title="値",
             template="plotly_white",
-            font=dict(color="#000000", size=14),
             hovermode="closest",
-            hoverlabel=dict(
-                bgcolor="#ffffff",
-                font_size=16,
-                font_color="#000000",
-                font_family="Yu Gothic, Meiryo, sans-serif",
-            ),
+            hoverlabel=dict(font_size=16, font_family="Yu Gothic, Meiryo, sans-serif"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
             margin=dict(l=30, r=20, t=90, b=20),
             height=420,
         )
-        fig1.update_xaxes(tickformat="%m月%d日", **axis_style)
-        fig1.update_yaxes(**axis_style)
+        fig1.update_xaxes(tickformat="%m月%d日")
         st.plotly_chart(fig1, width="stretch")
 
         # 二段目グラフ：BMI・体脂肪・内臓脂肪
@@ -1128,8 +1051,8 @@ else:
                     y=y_values,
                     mode="lines+markers",
                     name=name,
-                    line=dict(color=color, width=5),
-                    marker=dict(size=12, color=color),
+                    line=dict(color=color, width=3),
+                    marker=dict(size=10, color=color),
                     hovertemplate=build_hover_template(name, ""),
                 )
             )
@@ -1142,18 +1065,11 @@ else:
             xaxis_title="日付",
             yaxis_title="値",
             template="plotly_white",
-            font=dict(color="#000000", size=14),
             hovermode="closest",
-            hoverlabel=dict(
-                bgcolor="#ffffff",
-                font_size=16,
-                font_color="#000000",
-                font_family="Yu Gothic, Meiryo, sans-serif",
-            ),
+            hoverlabel=dict(font_size=16, font_family="Yu Gothic, Meiryo, sans-serif"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
             margin=dict(l=30, r=20, t=90, b=20),
             height=420,
         )
-        fig2.update_xaxes(tickformat="%m月%d日", **axis_style)
-        fig2.update_yaxes(**axis_style)
+        fig2.update_xaxes(tickformat="%m月%d日")
         st.plotly_chart(fig2, width="stretch")
