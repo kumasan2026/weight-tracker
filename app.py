@@ -119,7 +119,40 @@ def load_persistent_records(username):
 
 
 def save_persistent_records(username, records):
+    user_state = st.session_state.get("user", {})
+    previous_records = (
+        user_state.get("data", [])
+        if isinstance(user_state, dict)
+        else []
+    )
+    print(
+        f"[DEBUG] save_persistent_records: 保存前の履歴 "
+        f"({len(previous_records)}件): {previous_records!r}",
+        flush=True,
+    )
+
     normalized_records = normalize_records(records)
+    previous_by_date = {
+        record.get("date"): record
+        for record in previous_records
+        if isinstance(record, dict)
+    }
+    changed_records = [
+        record
+        for record in normalized_records
+        if previous_by_date.get(record["date"]) != record
+    ]
+    print(
+        f"[DEBUG] save_persistent_records: 追加・変更された記録 "
+        f"({len(changed_records)}件): {changed_records!r}",
+        flush=True,
+    )
+    print(
+        f"[DEBUG] save_persistent_records: Supabase送信予定の全履歴 "
+        f"({len(normalized_records)}件): {normalized_records!r}",
+        flush=True,
+    )
+
     json.dumps(
         normalized_records,
         ensure_ascii=False,
