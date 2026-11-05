@@ -130,16 +130,20 @@ def save_persistent_records(username, records):
         ensure_ascii=False,
         allow_nan=False,
     )
-    response = (
-        supabase.table("health_records")
-        .upsert({
-            "username": username,
-            "records_json": normalized_records,
-            "updated_at": datetime.now().astimezone().isoformat(),
-        })
-        .select("records_json")
-        .execute()
-    )
+    try:
+        response = (
+            supabase.table("health_records")
+            .upsert({
+                "username": username,
+                "records_json": normalized_records,
+                "updated_at": datetime.now().astimezone().isoformat(),
+            })
+            .select("records_json")
+            .execute()
+        )
+    except (APIError, SupabaseException, httpx.HTTPError) as exc:
+        print(f"health_records upsert failed ({type(exc).__name__}): {exc}", flush=True)
+        raise
     if not response.data:
         raise PersistenceError("Supabaseから保存結果が返されませんでした。")
 
@@ -511,9 +515,23 @@ st.markdown("""
         border: none !important;
     }
 
-    /* CSVアップロードの不要な補助テキストを隠す */
-    [data-testid="stFileUploaderDropzone"] small,
-    [data-testid="stFileUploaderDropzone"] [data-testid="stFileUploaderDropzoneInstructions"] {
+    [data-testid="stFileUploaderDropzone"] button > span {
+        display: none !important;
+    }
+
+    [data-testid="stFileUploaderDropzone"] button {
+        font-size: 0 !important;
+        color: transparent !important;
+    }
+
+    [data-testid="stFileUploaderDropzone"] button::after {
+        content: "取込み";
+        font-size: 0.9rem !important;
+    }
+
+    /* アップローダーの標準指示とボタン文字を隠す */
+    [data-testid="stFileUploaderDropzone"] [data-testid="stFileUploaderDropzoneInstructions"],
+    [data-testid="stFileUploaderDropzone"] small {
         display: none !important;
     }
 
@@ -559,9 +577,6 @@ if is_logged_in:
             key="logout_button",
             use_container_width=True,
         )
-    if logout_clicked:
-        st.session_state.user = {}
-        st.rerun()
 else:
     st.title("📊 BodyMetrics")
 
@@ -588,22 +603,11 @@ if not is_logged_in:
             st.error("ユーザー名またはパスワードが正しくありません。")
             return
 
-        try:
-            records = load_persistent_records(username)
-        except ValueError as exc:
-            st.error(f"記録データを読み込めません: {exc}")
-            return
-        except (APIError, SupabaseException, httpx.HTTPError, json.JSONDecodeError) as exc:
-            st.error(f"Supabaseから健康記録を読み込めません: {exc}")
-            return
-        except sqlite3.Error as exc:
-            st.error(f"保存済みの健康記録を読み込めません: {exc}")
-            return
-
         st.session_state.user = {
             "username": username,
-            "data": records,
+            "data": load_persistent_records(username),
             "user_db": {username: account},
+            "record_form_session_id": secrets.token_hex(16),
         }
         st.rerun()
 
@@ -695,10 +699,24 @@ if not is_logged_in:
                         "username": new_username,
                         "data": [],
                         "user_db": {new_username: persisted_password},
+                        "record_form_session_id": secrets.token_hex(16),
                     }
                     st.rerun()
 else:
     user_info = st.session_state.user
+
+    try:
+        user_info["data"] = load_persistent_records(user_info["username"])
+    except ValueError as exc:
+        st.error(f"記録データを読み込めません: {exc}")
+        st.stop()
+    except (APIError, SupabaseException, httpx.HTTPError, json.JSONDecodeError) as exc:
+        st.error(f"Supabaseから健康記録を読み込めません: {exc}")
+        st.stop()
+    except sqlite3.Error as exc:
+        st.error(f"保存済みの健康記録を読み込めません: {exc}")
+        st.stop()
+
     try:
         user_info["data"] = normalize_records(user_info.get("data", []))
         user_info["user_db"] = normalize_user_db(user_info.get("user_db"))
@@ -706,12 +724,17 @@ else:
         st.error(f"保存データに不整合があります: {exc}")
         st.session_state.user = {}
         st.rerun()
-        st.rerun()
+
     latest_record = max(
         user_info["data"],
         key=lambda record: record["date"],
         default={},
     )
+    record_form_session_id = user_info.get("record_form_session_id")
+    if not isinstance(record_form_session_id, str):
+        record_form_session_id = secrets.token_hex(16)
+        user_info["record_form_session_id"] = record_form_session_id
+
     col1, col2 = st.columns([1.8, 3.2])
     
     with col1:
@@ -723,7 +746,12 @@ else:
             jst = timezone(timedelta(hours=9))
             d = st.date_input(
                 "日付",
-                datetime.now(jst).date(),
+                (
+                    datetime.fromisoformat(latest_record["date"]).date()
+                    if latest_record
+                    else datetime.now(jst).date()
+                ),
+                key=f"record_date_{record_form_session_id}",
                 label_visibility="collapsed",
             )
 
@@ -739,6 +767,7 @@ else:
         latest_record_key = hashlib.sha256(
             json.dumps(
                 [
+                    record_form_session_id,
                     d.isoformat(),
                     *(
                         form_record.get(column)
@@ -899,17 +928,10 @@ else:
                     if restored is None or "records" not in restored:
                         raise ValueError("CSVに有効な #BACKUP データがありません。")
                     restored_records = normalize_records(restored["records"])
-                    persisted_records = save_persistent_records(
+                    save_persistent_records(
                         user_info["username"],
                         restored_records,
                     )
-                    user_info["data"] = persisted_records
-                    st.session_state.user = user_info
-                    # Streamlit locks a widget's state after rendering; rotate its key to clear it.
-                    st.session_state["history_backup_uploader_version"] = (
-                        uploader_version + 1
-                    )
-                    st.session_state.pop("history_backup_signature", None)
                     st.rerun()
                 except (
                     APIError,
@@ -923,7 +945,7 @@ else:
                     st.session_state.pop("history_backup_signature", None)
                     st.error(f"バックアップを読み込めません: {exc}")
 
-        if save_clicked:
+        if save_clicked or logout_clicked:
             new_data = {
                 "date": str(d),
                 "weight": w,
@@ -934,15 +956,33 @@ else:
                 "water": wat,
                 "notes": n,
             }
+            form_changed = any(
+                new_data[key] != form_measurement(key, default)
+                for key, default in (
+                    ("weight", 70.0),
+                    ("bmi", 22.0),
+                    ("body_fat", 20.0),
+                    ("visceral", 5.0),
+                    ("muscle_mass", 50.0),
+                    ("water", 55.0),
+                    ("notes", ""),
+                )
+            )
             try:
-                latest_records = load_persistent_records(user_info["username"])
-                updated_records = [
-                    record
-                    for record in latest_records
-                    if record["date"] != str(d)
-                ] + [new_data]
-                updated_records.sort(key=lambda record: record["date"], reverse=True)
-                persisted_records = save_persistent_records(
+                if save_clicked or form_changed:
+                    latest_records = load_persistent_records(user_info["username"])
+                    updated_records = [
+                        record
+                        for record in latest_records
+                        if record["date"] != str(d)
+                    ] + [new_data]
+                    updated_records.sort(
+                        key=lambda record: record["date"],
+                        reverse=True,
+                    )
+                else:
+                    updated_records = user_info["data"]
+                save_persistent_records(
                     user_info["username"],
                     updated_records,
                 )
@@ -956,8 +996,8 @@ else:
             except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
                 st.error(f"健康記録を保存・確認できません: {exc}")
             else:
-                st.session_state.user["data"] = persisted_records
-                user_info["data"] = persisted_records
+                if logout_clicked:
+                    st.session_state.clear()
                 st.rerun()
 
         if user_info["data"]:
