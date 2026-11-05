@@ -401,20 +401,22 @@ supabase_available = supabase is not None
 if "user" not in st.session_state:
     st.session_state.user = {}
 
-# トラブルの原因だった位置固定用のCSSを廃止し、文字サイズと余白の調整のみに限定
+# アプリ全体の文字と入力項目の視認性を統一
 st.markdown("""
     <style>
-    /* アプリ全体の基本文字 */
-    html, body, [data-testid="stMarkdownContainer"] p {
+    html, body, [data-testid="stMarkdownContainer"] p,
+    [data-testid="stMarkdownContainer"] li,
+    [data-testid="stWidgetLabel"] p,
+    [data-testid="stTable"], [data-testid="stDataFrame"] {
+        color: #000000 !important;
         font-size: 1.15rem !important;
         line-height: 1.6 !important;
     }
-    
-    /* 見出し（本日の記録、履歴データなど） */
+
     h2, h3, .stSubheader {
         font-size: 1.65rem !important;
-        font-weight: bold !important;
-        color: #111111 !important;
+        font-weight: 800 !important;
+        color: #000000 !important;
         margin-bottom: 15px !important;
         white-space: nowrap !important;
         word-break: keep-all !important;
@@ -424,23 +426,28 @@ st.markdown("""
         white-space: nowrap !important;
         word-break: keep-all !important;
         font-size: clamp(1.7rem, 2.4vw, 2.5rem) !important;
+        color: #000000 !important;
     }
-    
-    /* 入力項目のラベル文字 */
-    .stNumberInput label, .stDateInput label, .stTextInput label {
+
+    .stNumberInput label, .stDateInput label, .stTextInput label,
+    .stTextArea label, .stSelectbox label, .stFileUploader label {
         font-size: 1.15rem !important;
-        font-weight: 700 !important;
-        color: #222222 !important;
+        font-weight: 800 !important;
+        color: #000000 !important;
     }
-    
-    /* 入力枠内の数値・文字の大きさ */
+
     .stNumberInput input, .stDateInput input, .stTextInput input {
         font-size: 1.15rem !important;
         height: 48px !important;
         font-weight: bold !important;
+        color: #000000 !important;
     }
-    
-    /* バックアップ保存ボタンの調整 */
+
+    .stTextArea textarea, .stSelectbox [data-baseweb="select"] *,
+    [data-testid="stFileUploader"] * {
+        color: #000000 !important;
+    }
+
     .stButton button, .stDownloadButton button {
         font-size: 1.1rem !important;
         font-weight: bold !important;
@@ -459,10 +466,10 @@ st.markdown("""
         font-size: 1.15rem !important;
         white-space: nowrap !important;
         word-break: keep-all !important;
+        color: #000000 !important;
     }
 
     .st-key-save_daily_record,
-    .st-key-history_backup_uploader,
     .st-key-history_heading {
         min-width: 0 !important;
     }
@@ -475,13 +482,14 @@ st.markdown("""
         border: 2px solid #dbdbdb !important;
     }
     
-    /* 履歴データのテーブル内の文字サイズ */
+    /* 履歴データのテーブル内の文字 */
     [data-testid="stTable"] *, [data-testid="stDataFrame"] * {
         font-size: 1.25rem !important;
+        color: #000000 !important;
     }
 
     /* CSV読み込み上限の補助表示だけを隠す */
-    .st-key-history_backup_uploader [data-testid="stFileUploaderDropzone"] small {
+    [data-testid="stFileUploader"] [data-testid="stFileUploaderDropzone"] small {
         display: none !important;
     }
 
@@ -492,6 +500,7 @@ st.markdown("""
         min-height: 3.3rem;
         font-size: 1.05rem;
         font-weight: 700;
+        color: #000000;
         white-space: nowrap;
     }
 
@@ -844,41 +853,46 @@ else:
                 key="download_health_records",
                 use_container_width=True,
             )
+        uploader_version = st.session_state.get("history_backup_uploader_version", 0)
         with upload_col:
-            read_clicked = st.button(
+            uploaded_backup = st.file_uploader(
                 "読み込み",
-                key="btn_trigger_history_backup",
-                use_container_width=True,
+                type=["csv"],
+                key=f"history_backup_csv_uploader_{uploader_version}",
+                label_visibility="collapsed",
                 disabled=not supabase_available,
             )
-            if read_clicked:
-                st.session_state.show_history_backup_uploader = True
-                st.session_state.pop("history_backup_signature", None)
 
-        uploaded_backup = None
-        if (
-            supabase_available
-            and st.session_state.get("show_history_backup_uploader", False)
-        ):
-            with st.container(key="history_backup_uploader"):
-                uploader_col, cancel_col = st.columns([4, 1], vertical_alignment="bottom")
-                with uploader_col:
-                    uploaded_backup = st.file_uploader(
-                        "CSVファイルを選択",
-                        type=["csv"],
-                        key="history_backup_csv_uploader_fixed",
-                        label_visibility="collapsed",
+        if uploaded_backup is None:
+            st.session_state.pop("history_backup_signature", None)
+        else:
+            backup_bytes = uploaded_backup.getvalue()
+            backup_signature = hashlib.sha256(backup_bytes).hexdigest()
+            if st.session_state.get("history_backup_signature") != backup_signature:
+                st.session_state["history_backup_signature"] = backup_signature
+                try:
+                    restored = parse_backup_csv(uploaded_backup)
+                    if restored is None or "records" not in restored:
+                        raise ValueError("CSVに有効な #BACKUP データがありません。")
+                    restored_records = normalize_records(restored["records"])
+                    persisted_records = save_persistent_records(
+                        user_info["username"],
+                        restored_records,
                     )
-                with cancel_col:
-                    cancel_upload = st.button(
-                        "キャンセル",
-                        key="cancel_history_backup_upload",
-                        use_container_width=True,
+                    user_info["data"] = persisted_records
+                    st.session_state.user = user_info
+                    # Streamlit locks a widget's state after rendering; rotate its key to clear it.
+                    st.session_state["history_backup_uploader_version"] = (
+                        uploader_version + 1
                     )
-                if cancel_upload:
-                    st.session_state.show_history_backup_uploader = False
                     st.session_state.pop("history_backup_signature", None)
                     st.rerun()
+                except (APIError, SupabaseException, httpx.HTTPError) as exc:
+                    st.session_state.pop("history_backup_signature", None)
+                    st.error(f"Supabaseへバックアップを保存できません: {exc}")
+                except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+                    st.session_state.pop("history_backup_signature", None)
+                    st.error(f"バックアップを読み込めません: {exc}")
 
         if save_clicked:
             new_data = {
@@ -911,32 +925,6 @@ else:
                 user_info["data"] = persisted_records
                 st.session_state.user = user_info
                 st.rerun()
-
-        if uploaded_backup is None:
-            st.session_state.pop("history_backup_signature", None)
-        else:
-            backup_bytes = uploaded_backup.getvalue()
-            backup_signature = hashlib.sha256(backup_bytes).hexdigest()
-            if st.session_state.get("history_backup_signature") != backup_signature:
-                st.session_state["history_backup_signature"] = backup_signature
-                try:
-                    restored = parse_backup_csv(uploaded_backup)
-                    if restored is None or "records" not in restored:
-                        raise ValueError("CSVに有効な #BACKUP データがありません。")
-                    restored_records = normalize_records(restored["records"])
-                    persisted_records = save_persistent_records(
-                        user_info["username"],
-                        restored_records,
-                    )
-                    user_info["data"] = persisted_records
-                    st.session_state.user = user_info
-                    st.session_state.show_history_backup_uploader = False
-                    st.session_state.pop("history_backup_signature", None)
-                    st.rerun()
-                except (APIError, SupabaseException, httpx.HTTPError) as exc:
-                    st.error(f"Supabaseへバックアップを保存できません: {exc}")
-                except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
-                    st.error(f"バックアップを読み込めません: {exc}")
 
         if user_info["data"]:
             history_df = pd.DataFrame(user_info["data"])
@@ -1000,6 +988,14 @@ else:
                 f"{label}: %{{y:.2f}} {unit}<extra></extra>"
             )
 
+        axis_style = dict(
+            showline=True,
+            linewidth=2,
+            linecolor="#000000",
+            gridcolor="#e0e0e0",
+            tickfont=dict(color="#000000", size=14),
+        )
+
         # 一段目グラフ：体重・筋肉量・体内水分率
         fig1 = go.Figure()
         for name, key, color in [
@@ -1014,8 +1010,8 @@ else:
                     y=y_values,
                     mode="lines+markers",
                     name=name,
-                    line=dict(color=color, width=3),
-                    marker=dict(size=10, color=color),
+                    line=dict(color=color, width=5),
+                    marker=dict(size=12, color=color),
                     hovertemplate=build_hover_template(name, ""),
                 )
             )
@@ -1028,13 +1024,15 @@ else:
             xaxis_title="日付",
             yaxis_title="値",
             template="plotly_white",
+            font=dict(color="#000000", size=14),
             hovermode="closest",
             hoverlabel=dict(font_size=16, font_family="Yu Gothic, Meiryo, sans-serif"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
             margin=dict(l=30, r=20, t=90, b=20),
             height=420,
         )
-        fig1.update_xaxes(tickformat="%m月%d日")
+        fig1.update_xaxes(tickformat="%m月%d日", **axis_style)
+        fig1.update_yaxes(**axis_style)
         st.plotly_chart(fig1, width="stretch")
 
         # 二段目グラフ：BMI・体脂肪・内臓脂肪
@@ -1051,8 +1049,8 @@ else:
                     y=y_values,
                     mode="lines+markers",
                     name=name,
-                    line=dict(color=color, width=3),
-                    marker=dict(size=10, color=color),
+                    line=dict(color=color, width=5),
+                    marker=dict(size=12, color=color),
                     hovertemplate=build_hover_template(name, ""),
                 )
             )
@@ -1065,11 +1063,13 @@ else:
             xaxis_title="日付",
             yaxis_title="値",
             template="plotly_white",
+            font=dict(color="#000000", size=14),
             hovermode="closest",
             hoverlabel=dict(font_size=16, font_family="Yu Gothic, Meiryo, sans-serif"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
             margin=dict(l=30, r=20, t=90, b=20),
             height=420,
         )
-        fig2.update_xaxes(tickformat="%m月%d日")
+        fig2.update_xaxes(tickformat="%m月%d日", **axis_style)
+        fig2.update_yaxes(**axis_style)
         st.plotly_chart(fig2, width="stretch")
