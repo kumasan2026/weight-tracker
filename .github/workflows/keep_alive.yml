@@ -2,8 +2,10 @@ name: Keep Streamlit App Alive
 
 on:
   schedule:
-    - cron: '17 17 * * *'
+    - cron: '17 11 * * *' # 日本時間 20:17 頃（1回目）
+    - cron: '43 17 * * *' # 日本時間 02:43 頃（2回目・保険）
   workflow_dispatch:
+
 
 jobs:
   ping:
