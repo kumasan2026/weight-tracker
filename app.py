@@ -8,7 +8,6 @@ import math
 import os
 import re
 import secrets
-import sqlite3
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from io import StringIO
@@ -107,11 +106,12 @@ def load_persistent_records(username):
         supabase.table("health_records")
         .select("records_json")
         .eq("username", username)
-        .limit(1)
         .execute()
     )
     if not response.data:
         return []
+    if len(response.data) != 1:
+        raise ValueError("ユーザーの健康記録が複数行見つかりました。")
     stored_records = response.data[0]["records_json"]
     if isinstance(stored_records, str):
         stored_records = json.loads(stored_records)
@@ -119,55 +119,44 @@ def load_persistent_records(username):
 
 
 def save_persistent_records(username, records):
-    user_state = st.session_state.get("user", {})
-    previous_records = (
-        user_state.get("data", [])
-        if isinstance(user_state, dict)
-        else []
-    )
-    print(
-        f"[DEBUG] save_persistent_records: 保存前の履歴 "
-        f"({len(previous_records)}件): {previous_records!r}",
-        flush=True,
-    )
-
     normalized_records = normalize_records(records)
-    previous_by_date = {
-        record.get("date"): record
-        for record in previous_records
-        if isinstance(record, dict)
+    merged_records = load_persistent_records(username)
+    record_indexes = {
+        record["date"]: index
+        for index, record in enumerate(merged_records)
     }
-    changed_records = [
-        record
-        for record in normalized_records
-        if previous_by_date.get(record["date"]) != record
-    ]
-    print(
-        f"[DEBUG] save_persistent_records: 追加・変更された記録 "
-        f"({len(changed_records)}件): {changed_records!r}",
-        flush=True,
+    for record in normalized_records:
+        existing_index = record_indexes.get(record["date"])
+        if existing_index is None:
+            record_indexes[record["date"]] = len(merged_records)
+            merged_records.append(record)
+        else:
+            merged_records[existing_index] = record
+    merged_records.sort(key=lambda record: record["date"], reverse=True)
+
+    check_res = (
+        supabase.table("health_records")
+        .select("username", count="exact")
+        .eq("username", username)
+        .execute()
     )
-    print(
-        f"[DEBUG] save_persistent_records: Supabase送信予定の全履歴 "
-        f"({len(normalized_records)}件): {normalized_records!r}",
-        flush=True,
-    )
+    if (
+        (check_res.count is not None and check_res.count > 0)
+        or (check_res.data and len(check_res.data) > 0)
+    ):
+        (
+            supabase.table("health_records")
+            .update({"records_json": merged_records})
+            .eq("username", username)
+            .execute()
+        )
+    else:
+        supabase.table("health_records").insert({
+            "username": username,
+            "records_json": merged_records,
+        }).execute()
 
-    json.dumps(
-        normalized_records,
-        ensure_ascii=False,
-        allow_nan=False,
-    )
-    supabase.table("health_records").upsert({
-        "username": username,
-        "records_json": normalized_records,
-        "updated_at": datetime.now().astimezone().isoformat()
-    }).execute()
-
-    return normalized_records
-
-
-
+    return merged_records
 
 def verify_login(username, password, user_db):
     if (
@@ -239,7 +228,15 @@ def parse_backup_csv(uploaded_file):
         backup_line = line.strip()
         if backup_line.startswith("#BACKUP:"):
             return decode_data(backup_line.split("#BACKUP:", 1)[1].strip())
-    return None
+    if not text_data.strip():
+        return None
+    csv_records = pd.read_csv(
+        StringIO(text_data),
+        keep_default_na=False,
+    ).to_dict(orient="records")
+    if not csv_records:
+        return None
+    return {"records": csv_records}
 
 
 def build_backup_csv(records):
@@ -254,7 +251,7 @@ def build_backup_csv(records):
         )
     else:
         csv_buffer.write(
-            "date,weight,bmi,body_fat,fat_pct,visceral,muscle_mass,muscle,water,notes\n"
+            "date,weight,bmi,body_fat,visceral,muscle_mass,water,notes\n"
         )
     return csv_buffer.getvalue().encode("utf-8-sig")
 
@@ -268,22 +265,20 @@ def normalize_records(records):
         if not isinstance(record, dict):
             raise ValueError(f"{index + 1}件目の記録形式が正しくありません。")
 
-        normalized_record = dict(record)
-        if normalized_record.get("fat_pct") is None and normalized_record.get("fat") is not None:
-            normalized_record["fat_pct"] = normalized_record["fat"]
-        normalized_record.pop("fat", None)
-        normalized_record["body_fat"] = (
-            normalized_record.get("body_fat")
-            if normalized_record.get("body_fat") is not None
-            else normalized_record.get("fat_pct")
-        )
-        normalized_record["fat_pct"] = normalized_record["body_fat"]
-        normalized_record["muscle_mass"] = (
-            normalized_record.get("muscle_mass")
-            if normalized_record.get("muscle_mass") is not None
-            else normalized_record.get("muscle")
-        )
-        normalized_record["muscle"] = normalized_record["muscle_mass"]
+        normalized_record = {
+            column: record[column]
+            for column in (
+                "date",
+                "weight",
+                "bmi",
+                "body_fat",
+                "visceral",
+                "muscle_mass",
+                "water",
+                "notes",
+            )
+            if column in record
+        }
 
         if not normalized_record.get("date"):
             raise ValueError(f"{index + 1}件目の記録に日付がありません。")
@@ -299,10 +294,8 @@ def normalize_records(records):
             "weight",
             "bmi",
             "body_fat",
-            "fat_pct",
             "visceral",
             "muscle_mass",
-            "muscle",
             "water",
         ):
             if column not in normalized_record:
@@ -568,9 +561,6 @@ if not is_logged_in:
         except (APIError, SupabaseException, httpx.HTTPError) as exc:
             st.error(f"Supabaseのパスワードを読み込めません: {exc}")
             return
-        except sqlite3.Error as exc:
-            st.error(f"保存済みパスワードを読み込めません: {exc}")
-            return
 
         if persistent_password is None:
             st.error("ユーザー名またはパスワードが正しくありません。")
@@ -590,9 +580,6 @@ if not is_logged_in:
             return
         except (APIError, SupabaseException, httpx.HTTPError, json.JSONDecodeError) as exc:
             st.error(f"Supabaseから健康記録を読み込めません: {exc}")
-            return
-        except sqlite3.Error as exc:
-            st.error(f"保存済みの健康記録を読み込めません: {exc}")
             return
 
         st.session_state.user = {
@@ -663,18 +650,7 @@ if not is_logged_in:
                         )
                     else:
                         register_persistent_account(new_username, password_record)
-                        persisted_password = load_persistent_password(new_username)
-                        if persisted_password is None or any(
-                            persisted_password.get(key) != password_record[key]
-                            for key in (
-                                "password_salt",
-                                "password_hash",
-                                "password_iterations",
-                            )
-                        ):
-                            raise ValueError(
-                                "登録したパスワードを Supabase で確認できません。"
-                            )
+                        persisted_password = password_record
                         registration_succeeded = True
                 except APIError as exc:
                     if getattr(exc, "code", None) == "23505":
@@ -700,7 +676,6 @@ else:
     except (TypeError, ValueError) as exc:
         st.error(f"保存データに不整合があります: {exc}")
         st.session_state.user = {}
-        st.rerun()
         st.rerun()
     latest_record = max(
         user_info["data"],
@@ -741,9 +716,9 @@ else:
                             "date",
                             "weight",
                             "bmi",
-                            "fat_pct",
+                            "body_fat",
                             "visceral",
-                            "muscle",
+                            "muscle_mass",
                             "water",
                             "notes",
                         )
@@ -770,17 +745,38 @@ else:
                 key=f"weight_{latest_record_key}",
             )
 
+        height_label, height_input = st.columns([1, 2])
+        with height_label:
+            st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>身長 (cm)</div>", unsafe_allow_html=True)
+        with height_input:
+            if "user_height" not in st.session_state:
+                st.session_state["user_height"] = 170.0
+            h_cm = st.number_input(
+                "身長 (cm)",
+                value=st.session_state["user_height"],
+                step=0.1,
+                format="%.1f",
+                label_visibility="collapsed",
+                key=f"height_{latest_record_key}",
+            )
+            st.session_state["user_height"] = h_cm
+
+        if h_cm > 0:
+            b = float(w / ((h_cm / 100.0) ** 2))
+        else:
+            b = 0.0
+
         bmi_label, bmi_input = st.columns([1, 2])
         with bmi_label:
             st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>BMI</div>", unsafe_allow_html=True)
         with bmi_input:
-            b = st.number_input(
+            st.number_input(
                 "BMI",
-                value=form_measurement("bmi", 22.0),
-                step=0.05,
+                value=b,
                 format="%.2f",
                 label_visibility="collapsed",
-                key=f"bmi_{latest_record_key}",
+                disabled=True,
+                key=f"bmi_calc_{latest_record_key}",
             )
 
         fat_label, fat_input = st.columns([1, 2])
@@ -789,11 +785,11 @@ else:
         with fat_input:
             f = st.number_input(
                 "体脂肪率 (%)",
-                value=form_measurement("fat_pct", 20.0),
+                value=form_measurement("body_fat", 20.0),
                 step=0.05,
                 format="%.2f",
                 label_visibility="collapsed",
-                key=f"fat_{latest_record_key}",
+                key=f"body_fat_{latest_record_key}",
             )
 
         visceral_label, visceral_input = st.columns([1, 2])
@@ -815,11 +811,11 @@ else:
         with muscle_input:
             m = st.number_input(
                 "筋肉量 (kg)",
-                value=form_measurement("muscle", 50.0),
+                value=form_measurement("muscle_mass", 50.0),
                 step=0.05,
                 format="%.2f",
                 label_visibility="collapsed",
-                key=f"muscle_{latest_record_key}",
+                key=f"muscle_mass_{latest_record_key}",
             )
 
         water_label, water_input = st.columns([1, 2])
@@ -920,20 +916,13 @@ else:
                 "notes": n,
             }
             try:
-                latest_records = load_persistent_records(user_info["username"])
-                updated_records = [
-                    record
-                    for record in latest_records
-                    if record["date"] != str(d)
-                ] + [new_data]
-                updated_records.sort(key=lambda record: record["date"], reverse=True)
                 persisted_records = save_persistent_records(
                     user_info["username"],
-                    updated_records,
+                    [new_data],
                 )
             except (APIError, SupabaseException, httpx.HTTPError) as exc:
                 st.error(f"健康記録の保存またはSupabaseからの再読込に失敗しました: {exc}")
-            except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+            except (OSError, TypeError, ValueError) as exc:
                 st.error(f"健康記録を保存・確認できません: {exc}")
             else:
                 user_info["data"] = persisted_records
@@ -963,14 +952,14 @@ else:
                     st.rerun()
                 except (APIError, SupabaseException, httpx.HTTPError) as exc:
                     st.error(f"Supabaseへバックアップを保存できません: {exc}")
-                except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+                except (OSError, TypeError, ValueError) as exc:
                     st.error(f"バックアップを読み込めません: {exc}")
 
         if user_info["data"]:
             history_df = pd.DataFrame(user_info["data"])
             history_df = history_df.sort_values("date", ascending=False).reset_index(drop=True)
 
-            display_cols = ["date", "weight", "bmi", "fat_pct", "visceral", "muscle", "water", "notes"]
+            display_cols = ["date", "weight", "bmi", "body_fat", "visceral", "muscle_mass", "water", "notes"]
             for column in display_cols:
                 if column not in history_df.columns:
                     history_df[column] = "" if column == "notes" else None
@@ -978,8 +967,8 @@ else:
             
             display_df = display_df.rename(columns={
                 "date": "日付", "weight": "体重(kg)", "bmi": "BMI", 
-                "fat_pct": "体脂肪率(%)", "visceral": "内臓脂肪", 
-                "muscle": "筋肉量(kg)", "water": "体内水分率(%)",
+                "body_fat": "体脂肪率(%)", "visceral": "内臓脂肪",
+                "muscle_mass": "筋肉量(kg)", "water": "体内水分率(%)",
                 "notes": "メモ",
             })
 
@@ -1019,9 +1008,6 @@ else:
         df = pd.DataFrame(user_info["data"]).sort_values("date")
         df["date"] = pd.to_datetime(df["date"])
         
-        if "fat_pct" in df.columns:
-            df["fat"] = df["fat_pct"]
-
         def build_hover_template(label, unit):
             return (
                 "<b>%{x|%Y-%m-%d}</b><br>" +
@@ -1032,7 +1018,7 @@ else:
         fig1 = go.Figure()
         for name, key, color in [
             ("体重 (kg)", "weight", "#1f77b4"),
-            ("筋肉量 (kg)", "muscle", "#2ca02c"),
+            ("筋肉量 (kg)", "muscle_mass", "#2ca02c"),
             ("体内水分率 (%)", "water", "#17becf"),
         ]:
             y_values = numeric_series(df, key)
@@ -1069,7 +1055,7 @@ else:
         fig2 = go.Figure()
         for name, key, color in [
             ("BMI", "bmi", "#ff7f0e"),
-            ("体脂肪率 (%)", "fat", "#d62728"),
+            ("体脂肪率 (%)", "body_fat", "#d62728"),
             ("内臓脂肪レベル", "visceral", "#9467bd"),
         ]:
             y_values = numeric_series(df, key)
