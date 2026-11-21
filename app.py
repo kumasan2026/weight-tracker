@@ -1064,7 +1064,7 @@ else:
             hovermode="closest",
             hoverlabel=dict(font_size=16, font_family="Yu Gothic, Meiryo, sans-serif"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-            margin=dict(l=50, r=20, t=90, b=20),
+            margin=dict(l=60, r=20, t=90, b=20),
             height=420,
         )
         fig1.update_xaxes(tickformat="%m月%d日")
@@ -1101,7 +1101,7 @@ else:
             hovermode="closest",
             hoverlabel=dict(font_size=16, font_family="Yu Gothic, Meiryo, sans-serif"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-            margin=dict(l=50, r=20, t=90, b=20),
+            margin=dict(l=60, r=20, t=90, b=20),
             height=420,
         )
         fig2.update_xaxes(tickformat="%m月%d日")
