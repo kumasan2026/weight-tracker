@@ -1098,7 +1098,7 @@ else:
             ),
             xaxis_title="日付",
             yaxis_title="値",
-            yaxis=dict(range=[10, 28]),
+            yaxis=dict(range=[9, 28]),
             template="plotly_white",
             hovermode="closest",
             hoverlabel=dict(font_size=16, font_family="Yu Gothic, Meiryo, sans-serif"),
