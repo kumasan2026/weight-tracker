@@ -251,7 +251,7 @@ def build_backup_csv(records):
         )
     else:
         csv_buffer.write(
-            "date,weight,bmi,body_fat,visceral,muscle_mass,water,notes\n"
+            "date,height,weight,bmi,body_fat,visceral,muscle_mass,water,notes\n"
         )
     return csv_buffer.getvalue().encode("utf-8-sig")
 
@@ -269,6 +269,7 @@ def normalize_records(records):
             column: record[column]
             for column in (
                 "date",
+                "height",
                 "weight",
                 "bmi",
                 "body_fat",
@@ -291,6 +292,7 @@ def normalize_records(records):
         normalized_record["date"] = parsed_date.date().isoformat()
 
         for column in (
+            "height",
             "weight",
             "bmi",
             "body_fat",
@@ -714,6 +716,7 @@ else:
                         form_record.get(column)
                         for column in (
                             "date",
+                            "height",
                             "weight",
                             "bmi",
                             "body_fat",
@@ -732,6 +735,28 @@ else:
             value = form_record.get(column)
             return default if value is None else value
 
+        height_label, height_input = st.columns([1, 2])
+        with height_label:
+            st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>身長 (cm)</div>", unsafe_allow_html=True)
+        with height_input:
+            default_height = form_record.get(
+                "height",
+                st.session_state.get("user_height", 170.0),
+            )
+            if default_height is None or default_height <= 0:
+                default_height = st.session_state.get("user_height", 170.0)
+            if default_height is None or default_height <= 0:
+                default_height = 170.0
+            h_cm = st.number_input(
+                "身長 (cm)",
+                value=float(default_height),
+                step=0.1,
+                format="%.1f",
+                label_visibility="collapsed",
+                key=f"height_{latest_record_key}",
+            )
+            st.session_state["user_height"] = h_cm
+
         weight_label, weight_input = st.columns([1, 2])
         with weight_label:
             st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>体重 (kg)</div>", unsafe_allow_html=True)
@@ -744,22 +769,6 @@ else:
                 label_visibility="collapsed",
                 key=f"weight_{latest_record_key}",
             )
-
-        height_label, height_input = st.columns([1, 2])
-        with height_label:
-            st.markdown("<div style='height: 48px; display: flex; align-items: center; font-weight: 700'>身長 (cm)</div>", unsafe_allow_html=True)
-        with height_input:
-            if "user_height" not in st.session_state:
-                st.session_state["user_height"] = 170.0
-            h_cm = st.number_input(
-                "身長 (cm)",
-                value=st.session_state["user_height"],
-                step=0.1,
-                format="%.1f",
-                label_visibility="collapsed",
-                key=f"height_{latest_record_key}",
-            )
-            st.session_state["user_height"] = h_cm
 
         if h_cm > 0:
             b = float(w / ((h_cm / 100.0) ** 2))
@@ -907,6 +916,7 @@ else:
         if save_clicked:
             new_data = {
                 "date": str(d),
+                "height": h_cm,
                 "weight": w,
                 "bmi": b,
                 "body_fat": f,
@@ -959,26 +969,32 @@ else:
             history_df = pd.DataFrame(user_info["data"])
             history_df = history_df.sort_values("date", ascending=False).reset_index(drop=True)
 
-            display_cols = ["date", "weight", "bmi", "body_fat", "visceral", "muscle_mass", "water", "notes"]
+            display_cols = ["date", "height", "weight", "bmi", "body_fat", "visceral", "muscle_mass", "water", "notes"]
             for column in display_cols:
                 if column not in history_df.columns:
                     history_df[column] = "" if column == "notes" else None
             display_df = history_df[display_cols].copy()
+
+            if "height" in display_df.columns:
+                display_df["height"] = pd.to_numeric(
+                    display_df["height"],
+                    errors="coerce",
+                )
             
             display_df = display_df.rename(columns={
-                "date": "日付", "weight": "体重(kg)", "bmi": "BMI", 
+                "date": "日付", "height": "身長(cm)", "weight": "体重(kg)", "bmi": "BMI",
                 "body_fat": "体脂肪率(%)", "visceral": "内臓脂肪",
                 "muscle_mass": "筋肉量(kg)", "water": "体内水分率(%)",
                 "notes": "メモ",
             })
 
             display_df = display_df.reindex(columns=[
-                "日付", "体重(kg)", "BMI", "体脂肪率(%)",
+                "日付", "身長(cm)", "体重(kg)", "BMI", "体脂肪率(%)",
                 "内臓脂肪", "筋肉量(kg)", "体内水分率(%)", "メモ",
             ])
             display_df["日付"] = pd.to_datetime(display_df["日付"], errors="coerce").dt.date
             for col in display_df.columns:
-                if col not in ("日付", "メモ"):
+                if col not in ("日付", "メモ", "身長(cm)"):
                     display_df[col] = pd.to_numeric(display_df[col], errors="coerce")
             
             st.dataframe(
@@ -988,6 +1004,7 @@ else:
                 hide_index=True,
                 column_config={
                     "日付": st.column_config.DateColumn("日付", width=95, format="YYYY-MM-DD"),
+                    "身長(cm)": st.column_config.NumberColumn("身長(cm)", width=85, format="%.1f"),
                     "体重(kg)": st.column_config.NumberColumn("体重(kg)", width=85, format="%.1f"),
                     "BMI": st.column_config.NumberColumn("BMI", width=70, format="%.2f"),
                     "体脂肪率(%)": st.column_config.NumberColumn("体脂肪率(%)", width=105, format="%.1f"),
@@ -1007,6 +1024,8 @@ else:
     if user_info["data"]:
         df = pd.DataFrame(user_info["data"]).sort_values("date")
         df["date"] = pd.to_datetime(df["date"])
+        if "height" in df.columns:
+            df["height"] = pd.to_numeric(df["height"], errors="coerce")
         
         def build_hover_template(label, unit):
             return (
