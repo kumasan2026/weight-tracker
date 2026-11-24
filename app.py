@@ -1026,7 +1026,22 @@ else:
         df["date"] = pd.to_datetime(df["date"])
         if "height" in df.columns:
             df["height"] = pd.to_numeric(df["height"], errors="coerce")
+
+                # 【追加】期間選択ボタンの配置
+        period = st.radio(
+            "表示期間",
+            ["全期間", "過去30日間", "過去7日間"],
+            horizontal=True,
+            label_visibility="collapsed"
+        )
         
+        # 選択された期間でデータを絞り込む
+        latest_date = df["date"].max()
+        if period == "過去30日間":
+            df = df[df["date"] >= (latest_date - pd.Timedelta(days=30))]
+        elif period == "過去7日間":
+            df = df[df["date"] >= (latest_date - pd.Timedelta(days=7))]
+
         def build_hover_template(label, unit):
             return (
                 "<b>%{x|%Y-%m-%d}</b><br>" +
@@ -1045,7 +1060,14 @@ else:
                 go.Scatter(
                     x=df["date"],
                     y=y_values,
-                    mode="lines+markers",
+                    mode="lines+markers" if period == "全期間" else "lines+markers+text",
+                    text=y_values.round(1),
+                    textposition=(
+                        "top center" if key == "weight" else 
+                        "bottom center" if key == "muscle_mass" else 
+                        "top right"
+                    ),
+                    textfont=dict(color=color, size=12),
                     name=name,
                     line=dict(color=color, width=3),
                     marker=dict(size=10, color=color),
@@ -1061,6 +1083,7 @@ else:
             xaxis_title="日付",
             yaxis_title="値",
             yaxis=dict(range=[45, 85]),
+            xaxis=dict(showgrid=True),  # 日付の縦線を追加
             template="plotly_white",
             hovermode="closest",
             hoverlabel=dict(font_size=16, font_family="Yu Gothic, Meiryo, sans-serif"),
@@ -1083,7 +1106,14 @@ else:
                 go.Scatter(
                     x=df["date"],
                     y=y_values,
-                    mode="lines+markers",
+                    mode="lines+markers" if period == "全期間" else "lines+markers+text",
+                    text=y_values.round(1),
+                    textposition=(
+                        "top center" if key == "bmi" else 
+                        "bottom center" if key == "body_fat" else 
+                        "bottom right"
+                    ),
+                    textfont=dict(color=color, size=12),
                     name=name,
                     line=dict(color=color, width=3),
                     marker=dict(size=10, color=color),
@@ -1099,6 +1129,7 @@ else:
             xaxis_title="日付",
             yaxis_title="値",
             yaxis=dict(range=[9, 28]),
+            xaxis=dict(showgrid=True),
             template="plotly_white",
             hovermode="closest",
             hoverlabel=dict(font_size=16, font_family="Yu Gothic, Meiryo, sans-serif"),
