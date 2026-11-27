@@ -418,7 +418,7 @@ else:
     else:
         try:
             supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        except (ValueError, SupabaseException, httpx.HTTPError) as exc:
+        except (ValueError, Exception, httpx.HTTPError) as exc:
             SUPABASE_CONFIG_ERROR = f"Supabaseクライアントを初期化できません: {exc}"
 
 if SUPABASE_CONFIG_ERROR:
