@@ -20,8 +20,8 @@ import plotly.graph_objects as go
 import streamlit as st
 from dotenv import load_dotenv
 from postgrest.exceptions import APIError
-from supabase_py import create_client
-Client = None
+from supabase import create_client
+from supabase.lib.client_options import ClientOptions as Client
 from streamlit.errors import StreamlitSecretNotFoundError
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
