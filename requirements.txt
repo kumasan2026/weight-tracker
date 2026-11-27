@@ -5,4 +5,4 @@ plotly
 httpx
 psycopg[binary]
 python-dotenv
-supabase
+supabase==2.3.0
