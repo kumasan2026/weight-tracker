@@ -3,6 +3,5 @@ pandas
 matplotlib
 plotly
 httpx
-psycopg[binary]
 python-dotenv
 supabase==2.3.0
