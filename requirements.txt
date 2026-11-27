@@ -4,4 +4,4 @@ matplotlib
 plotly
 httpx
 python-dotenv
-supabase==2.3.0
+supabase
