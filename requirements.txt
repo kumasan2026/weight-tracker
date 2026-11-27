@@ -1,7 +1,8 @@
 streamlit
 pandas
+matplotlib
 plotly
 httpx
 psycopg[binary]
-supabase
 python-dotenv
+supabase
