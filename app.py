@@ -21,10 +21,8 @@ import streamlit as st
 from dotenv import load_dotenv
 from postgrest.exceptions import APIError
 from supabase import create_client
-try:
-    from supabase import Client
-except ImportError:
-    from supabase.client import Client
+import supabase
+from supabase_py import create_client, Client
 from supabase.lib.client_options import ClientOptions as Client
 from streamlit.errors import StreamlitSecretNotFoundError
 
