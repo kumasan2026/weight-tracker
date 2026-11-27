@@ -20,10 +20,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from dotenv import load_dotenv
 from postgrest.exceptions import APIError
-from supabase import create_client
-import supabase
-from supabase_py import create_client, Client
-from supabase.lib.client_options import ClientOptions as Client
+from supabase import create_client, Client
 from streamlit.errors import StreamlitSecretNotFoundError
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
@@ -563,7 +560,7 @@ if not is_logged_in:
         username = username.strip()
         try:
             persistent_password = load_persistent_password(username)
-        except (APIError, SupabaseException, httpx.HTTPError) as exc:
+        except (APIError, Exception, httpx.HTTPError) as exc:
             st.error(f"Supabaseのパスワードを読み込めません: {exc}")
             return
 
@@ -583,7 +580,7 @@ if not is_logged_in:
         except ValueError as exc:
             st.error(f"記録データを読み込めません: {exc}")
             return
-        except (APIError, SupabaseException, httpx.HTTPError, json.JSONDecodeError) as exc:
+        except (APIError, Exception, httpx.HTTPError, json.JSONDecodeError) as exc:
             st.error(f"Supabaseから健康記録を読み込めません: {exc}")
             return
 
